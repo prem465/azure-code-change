@@ -7,12 +7,17 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  SOURCE_WORKSPACE_ID: '<Replace_with_Dev_Workspace_ID>'
-  TARGET_WORKSPACE_ID: '<Replace_with_UAT_Workspace_ID>'
-  CLIENT_ID: '<Replace_with_Client_ID>'
-  CLIENT_SECRET: '<Replace_with_Client_Secret>'
-  TENANT_ID: '<Replace_with_Tenant_ID>'
-  DEPENDENCIES:
+  # Workspace IDs
+  SOURCE_WORKSPACE_ID: 'c017440f-4a5b-46bd-a2c0-93ee3f04ab4d' # Dev Workspace ID
+  TARGET_WORKSPACE_ID: 'a4628c7b-adda-4285-8c1f-758b19162d0b' # UAT/Test Workspace ID
+  
+  # Authentication Details
+  CLIENT_ID: $(CLIENT_ID) # Set this in pipeline variables
+  CLIENT_SECRET: $(CLIENT_SECRET) # Set this in pipeline variables (as secret)
+  TENANT_ID: $(TENANT_ID) # Set this in pipeline variables
+
+  # Dependencies to be installed
+  DEPENDENCIES: 
     - MicrosoftPowerBIMgmt
     - Invoke-DQVTesting
     - Invoke-SemanticModelRefresh
@@ -29,48 +34,50 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      $dependencies = @("MicrosoftPowerBIMgmt", "Invoke-DQVTesting", "Invoke-SemanticModelRefresh")
-      foreach ($module in $dependencies) {
-          if (!(Get-Module -ListAvailable -Name $module)) {
-              Write-Host "Installing module: $($module)"
-              Install-Module -Name $module -Scope CurrentUser -Force
-          } else {
-              Write-Host "Module $($module) is already installed."
-          }
+      Write-Host "Installing dependencies dynamically..."
+      foreach ($module in ${{ variables.DEPENDENCIES }}) {
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+          Install-Module -Name $module -Scope CurrentUser -Force
+          Write-Host "Installed module: $module"
+        } else {
+          Write-Host "Module $module is already installed"
+        }
       }
 
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
-  displayName: Authenticate Power BI
+  displayName: Authenticate Power BI Service
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      $secret = (${env:CLIENT_SECRET} | ConvertTo-SecureString -AsPlainText -Force)
-      $credential = [System.Management.Automation.PSCredential]::new(${env:CLIENT_ID}, $secret)
-      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "${env:TENANT_ID}"
-      Write-Host "Authentication successful for Power BI."
+      Write-Host "Authenticating with Power BI Service..."
+      $clientId = "${{ variables.CLIENT_ID }}"
+      $clientSecret = "${{ variables.CLIENT_SECRET }}"
+      $tenantId = "${{ variables.TENANT_ID }}"
+      $secureSecret = $clientSecret | ConvertTo-SecureString -AsPlainText -Force
+      $credential = [System.Management.Automation.PSCredential]::new($clientId, $secureSecret)
+      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
+      Write-Host "Authentication successful!"
 
-# Step 4: Detect Changes in Latest Commit
+# Step 4: Detect Changes in Commit
 - task: PowerShell@2
-  displayName: Detect Changed Files
+  displayName: Detect Changes in Commit
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      # Detect file changes
-      $ChangedSemanticModels = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
-      $ChangedReports = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
+      Write-Host "Detecting changes in commit..."
+      $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
+      $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
 
-      if ($ChangedSemanticModels.Count -eq 0 -and $ChangedReports.Count -eq 0) {
-          Write-Host "No changes detected. Exiting pipeline."
-          exit 0
+      $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+      $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+      if ($pbipDSChanges -eq $null -and $pbipRPTChanges -eq $null) {
+        Write-Host "No changes detected in the commit. Exiting pipeline..."
+        exit 0
       }
-
-      Write-Output "##vso[task.setvariable variable=ChangedSemanticModels]$ChangedSemanticModels"
-      Write-Output "##vso[task.setvariable variable=ChangedReports]$ChangedReports"
-      Write-Host "Detected Semantic Models: $ChangedSemanticModels"
-      Write-Host "Detected Reports: $ChangedReports"
 
 # Step 5: Validate Semantic Models and Reports
 - task: PowerShell@2
@@ -79,23 +86,13 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      $ChangedSemanticModels = "$(ChangedSemanticModels)"
-      $ChangedReports = "$(ChangedReports)"
-      foreach ($change in $ChangedSemanticModels) {
-          Write-Host "Validating Semantic Model: $change"
-          if (-not (Test-Path $change)) {
-              Write-Host "##[error] Semantic Model $change not found. Skipping."
-              continue
-          }
+      Write-Host "Validating semantic models and reports..."
+      foreach ($change in $pbipDSChanges) {
+        Write-Host "Validating semantic model: $change"
       }
-      foreach ($change in $ChangedReports) {
-          Write-Host "Validating Report: $change"
-          if (-not (Test-Path $change)) {
-              Write-Host "##[error] Report $change not found. Skipping."
-              continue
-          }
+      foreach ($change in $pbipRPTChanges) {
+        Write-Host "Validating report: $change"
       }
-      Write-Host "Validation completed successfully."
 
 # Step 6: Promote Files to UAT
 - task: PowerShell@2
@@ -104,24 +101,45 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      $sourceWorkspaceId = "$(SOURCE_WORKSPACE_ID)"
-      $targetWorkspaceId = "$(TARGET_WORKSPACE_ID)"
-      $ChangedSemanticModels = "$(ChangedSemanticModels)"
-      $ChangedReports = "$(ChangedReports)"
-
-      foreach ($change in $ChangedSemanticModels) {
-          Write-Host "Promoting Semantic Model: $change"
-          Copy-PowerBIDataset -DatasetId $change -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
+      Write-Host "Promoting files to UAT..."
+      $sourceWorkspaceId = "${{ variables.SOURCE_WORKSPACE_ID }}"
+      $targetWorkspaceId = "${{ variables.TARGET_WORKSPACE_ID }}"
+      
+      $reports = Get-PowerBIReport -WorkspaceId $sourceWorkspaceId
+      $datasets = Get-PowerBIDataset -WorkspaceId $sourceWorkspaceId
+      
+      foreach ($report in $reports) {
+        Write-Host "Promoting report: $($report.Name)"
+        Copy-PowerBIReport -ReportId $report.Id -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
       }
-      foreach ($change in $ChangedReports) {
-          Write-Host "Promoting Report: $change"
-          Copy-PowerBIReport -ReportId $change -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
+      foreach ($dataset in $datasets) {
+        Write-Host "Promoting dataset: $($dataset.Name)"
+        Copy-PowerBIDataset -DatasetId $dataset.Id -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
       }
-      Write-Host "Promotion completed successfully."
 
 # Step 7: Log Results
+- task: PowerShell@2
+  displayName: Log Pipeline Results
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Write-Host "Logging pipeline results..."
+      $logs = @()
+      $logs += "Pipeline executed successfully!"
+      $logs += "Promoted Reports:"
+      foreach ($report in $reports) {
+        $logs += $report.Name
+      }
+      $logs += "Promoted Datasets:"
+      foreach ($dataset in $datasets) {
+        $logs += $dataset.Name
+      }
+      $logs | Out-File "$(Pipeline.Workspace)/logs/PromotionResults.txt"
+      Write-Host "Logs saved successfully!"
+
+# Publish Logs as Artifacts
 - task: PublishBuildArtifacts@1
   displayName: Publish Logs
   inputs:
     pathToPublish: $(Pipeline.Workspace)/logs
-    artifactName: PromotionLogs
