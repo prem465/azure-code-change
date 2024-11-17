@@ -108,5 +108,12 @@ steps:
     targetType: inline
     script: |
       Write-Host "Logging results..."
+      # Log timestamp
+      Get-Date | Out-File -FilePath $(Pipeline.Workspace)/log.txt -Append
       # Log changes and promotions
-      Out-File -FilePath $(Pipeline.Workspace)/log.txt -InputObject $changedFiles
+      foreach ($file in $changedFiles) {
+        $logEntry = "Promoted file: $file"
+        $logEntry | Out-File -FilePath $(Pipeline.Workspace)/log.txt -Append
+      }
+      Write-Host "Logs stored in: $(Pipeline.Workspace)/log.txt"
+
