@@ -7,17 +7,8 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  # Workspace IDs
-  SOURCE_WORKSPACE_ID: 'c017440f-4a5b-46bd-a2c0-93ee3f04ab4d' # Dev Workspace ID
-  TARGET_WORKSPACE_ID: 'a4628c7b-adda-4285-8c1f-758b19162d0b' # UAT/Test Workspace ID
-  
-  # Authentication Details
-  CLIENT_ID: $(CLIENT_ID) # Set this in pipeline variables
-  CLIENT_SECRET: $(CLIENT_SECRET) # Set this in pipeline variables (as secret)
-  TENANT_ID: $(TENANT_ID) # Set this in pipeline variables
-
-  # Dependencies to be installed
-  DEPENDENCIES: 
+  - group: powerbi
+  DEPENDENCIES:
     - MicrosoftPowerBIMgmt
     - Invoke-DQVTesting
     - Invoke-SemanticModelRefresh
@@ -29,117 +20,88 @@ steps:
 
 # Step 2: Install Dependencies Dynamically
 - task: PowerShell@2
-  displayName: Install Required Modules
+  displayName: 'Install Required Modules'
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Installing dependencies dynamically..."
       foreach ($module in ${{ variables.DEPENDENCIES }}) {
-        if (-not (Get-Module -ListAvailable -Name $module)) {
+        if (!(Get-Module -ListAvailable -Name $module)) {
           Install-Module -Name $module -Scope CurrentUser -Force
-          Write-Host "Installed module: $module"
-        } else {
-          Write-Host "Module $module is already installed"
         }
       }
 
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
-  displayName: Authenticate Power BI Service
+  displayName: 'Authenticate with Power BI Service'
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Authenticating with Power BI Service..."
-      $clientId = "${{ variables.CLIENT_ID }}"
-      $clientSecret = "${{ variables.CLIENT_SECRET }}"
-      $tenantId = "${{ variables.TENANT_ID }}"
-      $secureSecret = $clientSecret | ConvertTo-SecureString -AsPlainText -Force
-      $credential = [System.Management.Automation.PSCredential]::new($clientId, $secureSecret)
-      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-      Write-Host "Authentication successful!"
+      $secret = "${{ variables.CLIENTSECRET }}" | ConvertTo-SecureString -AsPlainText -Force
+      $credential = [System.Management.Automation.PSCredential]::new("${{ variables.CLIENTID }}", $secret)
+      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "${{ variables.TENANTID }}"
 
 # Step 4: Detect Changes in Commit
 - task: PowerShell@2
-  displayName: Detect Changes in Commit
+  displayName: 'Detect Changes in Commit'
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Detecting changes in commit..."
-      $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
-      $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
-
+      $pbipDSChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**'
+      $pbipRPTChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**'
       $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
       $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
 
       if ($pbipDSChanges -eq $null -and $pbipRPTChanges -eq $null) {
-        Write-Host "No changes detected in the commit. Exiting pipeline..."
+        Write-Host "No changes detected. Exiting..."
         exit 0
       }
 
 # Step 5: Validate Semantic Models and Reports
 - task: PowerShell@2
-  displayName: Validate Semantic Models and Reports
+  displayName: 'Validate Semantic Models and Reports'
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Validating semantic models and reports..."
-      foreach ($change in $pbipDSChanges) {
-        Write-Host "Validating semantic model: $change"
-      }
-      foreach ($change in $pbipRPTChanges) {
-        Write-Host "Validating report: $change"
-      }
+      # Add validation logic as needed
 
 # Step 6: Promote Files to UAT
 - task: PowerShell@2
-  displayName: Promote Files to UAT
+  displayName: 'Promote Files to UAT'
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Promoting files to UAT..."
-      $sourceWorkspaceId = "${{ variables.SOURCE_WORKSPACE_ID }}"
-      $targetWorkspaceId = "${{ variables.TARGET_WORKSPACE_ID }}"
-      
+      $sourceWorkspaceId = "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d" # Replace with actual source workspace ID
+      $targetWorkspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b" # Replace with actual target workspace ID
+
       $reports = Get-PowerBIReport -WorkspaceId $sourceWorkspaceId
       $datasets = Get-PowerBIDataset -WorkspaceId $sourceWorkspaceId
-      
+
       foreach ($report in $reports) {
-        Write-Host "Promoting report: $($report.Name)"
+        Write-Host "Moving report: $($report.Name) from Dev to UAT"
         Copy-PowerBIReport -ReportId $report.Id -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
       }
+
       foreach ($dataset in $datasets) {
-        Write-Host "Promoting dataset: $($dataset.Name)"
+        Write-Host "Moving dataset: $($dataset.Name) from Dev to UAT"
         Copy-PowerBIDataset -DatasetId $dataset.Id -SourceWorkspaceId $sourceWorkspaceId -TargetWorkspaceId $targetWorkspaceId
       }
 
 # Step 7: Log Results
 - task: PowerShell@2
-  displayName: Log Pipeline Results
+  displayName: 'Log Results'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      Write-Host "Logging pipeline results..."
-      $logs = @()
-      $logs += "Pipeline executed successfully!"
-      $logs += "Promoted Reports:"
-      foreach ($report in $reports) {
-        $logs += $report.Name
-      }
-      $logs += "Promoted Datasets:"
-      foreach ($dataset in $datasets) {
-        $logs += $dataset.Name
-      }
-      $logs | Out-File "$(Pipeline.Workspace)/logs/PromotionResults.txt"
-      Write-Host "Logs saved successfully!"
-
-# Publish Logs as Artifacts
-- task: PublishBuildArtifacts@1
-  displayName: Publish Logs
-  inputs:
-    pathToPublish: $(Pipeline.Workspace)/logs
+      Write-Host "Logging results..."
+      # Add logging logic as needed
