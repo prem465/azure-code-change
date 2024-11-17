@@ -7,7 +7,7 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  - group: powerbi
+  group: powerbi
   DEPENDENCIES:
     - MicrosoftPowerBIMgmt
     - Invoke-DQVTesting
