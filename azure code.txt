@@ -7,14 +7,15 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  group: powerbi  # Ensure this variable group contains clientid, clientsecret, and tenantid
-  MODULE_LIST:
+  group: powerbi  # Ensure this contains clientid, clientsecret, tenantid
+  SOURCE_WORKSPACE_ID: "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d"  # Dev workspace ID
+  TARGET_WORKSPACE_ID: "a4628c7b-adda-4285-8c1f-758b19162d0b"  # UAT workspace ID
+  MODULE_LIST: |
     - MicrosoftPowerBIMgmt
     - Invoke-DQVTesting
     - Invoke-SemanticModelRefresh
 
 steps:
-
 # Step 1: Checkout Repository
 - checkout: self
   displayName: 'Checkout Repository'
@@ -28,43 +29,30 @@ steps:
     script: |
       Write-Host "Installing dependencies dynamically..."
       foreach ($module in ${{ variables.MODULE_LIST }}) {
-          Write-Host "Checking for module: $module"
-          if (-not (Get-Module -ListAvailable -Name $module)) {
-              Write-Host "Installing module: $module"
-              Install-Module -Name $module -Scope CurrentUser -Force
-          } else {
-              Write-Host "$module is already installed."
-          }
+        if (-not (Get-Module -ListAvailable -Name $module)) {
+          Install-Module -Name $module -Scope CurrentUser -Force
+        }
       }
 
-# Step 3: Authenticate Power BI Service
+# Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate Power BI Service'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      Write-Host "Authenticating with Power BI Service..."
-      $secureSecret = $env:Clientsecret | ConvertTo-SecureString -AsPlainText -Force
-      $credential = [System.Management.Automation.PSCredential]::new($env:Clientid, $secureSecret)
-      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:Tenantid
+      Connect-PowerBIServiceAccount -ServicePrincipal -Credential (New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, (ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force))) -TenantId $env:TENANT_ID
 
 # Step 4: Detect Changes in Commit
 - task: PowerShell@2
-  displayName: 'Detect Changes in Commit'
+  displayName: 'Detect Changed Files'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      Write-Host "Detecting changes in the current commit..."
-      git diff --name-only HEAD^ HEAD > changed_files.txt
-      $changedFiles = Get-Content changed_files.txt
-      if (!$changedFiles) {
-          Write-Host "No changes detected in the current commit."
-          exit 0
-      } else {
-          Write-Host "Changed files: $changedFiles"
-      }
+      Write-Host "Detecting changed files..."
+      $changedFiles = git diff --name-only HEAD~1..HEAD
+      Write-Host "Changed files: $changedFiles"
 
 # Step 5: Validate Semantic Models and Reports
 - task: PowerShell@2
@@ -75,14 +63,22 @@ steps:
     script: |
       Write-Host "Validating Semantic Models and Reports..."
       foreach ($file in $changedFiles) {
-          if ($file -match "semanticmodel") {
-              Write-Host "Validating semantic model: $file"
-              # Add validation logic here for semantic models
+        if ($file -match "semanticmodel") {
+          Write-Host "Validating semantic model: $file"
+          # Validation logic for semantic models
+          $model = Import-SemanticModel -FilePath $file
+          if (-not $model.IsValid) {
+            throw "Semantic model validation failed for $file"
           }
-          if ($file -match "report") {
-              Write-Host "Validating report: $file"
-              # Add validation logic here for reports
+        }
+        if ($file -match "report") {
+          Write-Host "Validating report: $file"
+          # Validation logic for reports
+          $report = Get-PowerBIReport -FilePath $file
+          if (-not $report.IsValid) {
+            throw "Report validation failed for $file"
           }
+        }
       }
 
 # Step 6: Promote Files to UAT
@@ -94,8 +90,14 @@ steps:
     script: |
       Write-Host "Promoting files to UAT..."
       foreach ($file in $changedFiles) {
-          Write-Host "Promoting $file to UAT..."
-          # Add logic here to promote files to the UAT workspace
+        if ($file -match "semanticmodel") {
+          Write-Host "Promoting semantic model $file to UAT"
+          Publish-SemanticModel -FilePath $file -WorkspaceId ${{ variables.TARGET_WORKSPACE_ID }}
+        }
+        if ($file -match "report") {
+          Write-Host "Promoting report $file to UAT"
+          Publish-PowerBIReport -FilePath $file -WorkspaceId ${{ variables.TARGET_WORKSPACE_ID }}
+        }
       }
 
 # Step 7: Log Results
@@ -105,5 +107,6 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      Write-Host "Logging results of pipeline execution..."
-      # Optionally save logs to an Azure artifact or external storage for review
+      Write-Host "Logging results..."
+      # Log changes and promotions
+      Out-File -FilePath $(Pipeline.Workspace)/log.txt -InputObject $changedFiles
