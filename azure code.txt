@@ -46,18 +46,6 @@ steps:
           Write-Host "Module $module is already installed."
         }
       }
-# Debug Variables Step
-- task: PowerShell@2
-  displayName: 'Debug Variables'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      Write-Host "Debugging Variables..."
-      Write-Host "TenantId: ${{ variables.tenantid }}"
-      Write-Host "ClientId: ${{ variables.clientid }}"
-      Write-Host "ClientSecret: (hidden for security)"
-
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
@@ -66,7 +54,22 @@ steps:
     targetType: inline
     script: |
       Write-Host "Authenticating with Power BI Service..."
-      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId ${{ variables.TENANT_ID }} -ClientId ${{ variables.CLIENT_ID }} -ClientSecret ${{ variables.CLIENT_SECRET }}
+
+      # Import Power BI Module explicitly
+      Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
+
+      # Perform Service Principal Authentication securely
+      Connect-PowerBIServiceAccount -ServicePrincipal `
+          -TenantId $env:tenantid `
+          -ClientId $env:clientid `
+          -ClientSecret $env:clientsecret
+
+      Write-Host "Authentication successful."
+  env:
+    tenantid: ${{ variables.tenantid }}
+    clientid: ${{ variables.clientid }}
+    clientsecret: ${{ variables.clientsecret }}
+
 
 # Step 4: Detect Changes in Commit
 - task: PowerShell@2
