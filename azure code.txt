@@ -28,8 +28,10 @@ steps:
     targetType: inline
     script: |
       Write-Host "Installing dependencies dynamically..."
-      foreach ($module in ${{ variables.MODULE_LIST }}){
+      $modules = @(${{ variables.MODULE_LIST }}.Split("`n"))
+      foreach ($module in $modules) {
         if (-not (Get-Module -ListAvailable -Name $module)) {
+          Write-Host "Installing module: $module"
           Install-Module -Name $module -Scope CurrentUser -Force
         }
       }
