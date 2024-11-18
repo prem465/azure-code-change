@@ -49,27 +49,37 @@ steps:
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
-  env:
-    tenantid: ${{ variables.tenantid }}
-    clinetid: ${{ variables.clinetid }}
-    Clientsecret: ${{ variables.Clientsecret }}
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Authenticating with Power BI Service..."
-      
-      # Import Power BI Module explicitly
-      Import-Module MicrosoftPowerBIMgmt
-      
-      # Perform Service Principal Authentication using environment variables
-      $tenantId = $env:tenantid
-      $clientId = $env:clinetid
-      $clientSecret = $env:Clientsecret
-      
-      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
-      
+
+      # Secure Credential Setup
+      $secret = "${{ variables.Clientsecret }}" | ConvertTo-SecureString -AsPlainText -Force
+      $credential = [System.Management.Automation.PSCredential]::new("${{ variables.clinetid }}", $secret)
+
+      # Check if service principal or username/password
+      $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+      $isServicePrincipal = $false
+
+      if ($credential.UserName -match $guidRegex) {
+        $isServicePrincipal = $true
+      }
+
+      # Set Fabric Connection
+      if ($isServicePrincipal) {
+        Write-Host "Using Service Principal for authentication..."
+        Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+          -servicePrincipalSecret ([System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))) `
+          -tenantId "${{ variables.tenantid }}" -reset
+      } else {
+        Write-Host "Using User Credentials for authentication..."
+        Set-FabricAuthToken -credential $credential -tenantId "${{ variables.tenantid }}" -reset
+      }
+
       Write-Host "Authentication successful."
+
 
 
 
