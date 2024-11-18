@@ -47,33 +47,34 @@ steps:
           Write-Host "Module $module is already installed."
         }
       }
-# Step 3: Authenticate with Power BI Service
+# Step 3: Authenticate with Azure and Power BI Service
 - task: PowerShell@2
-  displayName: 'Authenticate with Power BI Service'
+  displayName: 'Authenticate with Azure and Power BI Service'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      Write-Host "Authenticating with Power BI Service..."
+      Write-Host "Authenticating with Azure and Power BI Service..."
 
       # Setup variables for credentials
-      $clientSecret = "${{ variables.Clientsecret }}" | ConvertTo-SecureString -AsPlainText -Force
+      $clientSecret = "${{ variables.Clientsecret }}"
       $clientId = "${{ variables.clinetid }}"
       $tenantId = "${{ variables.tenantid }}"
 
-      # Create a credential object
-      $credential = [System.Management.Automation.PSCredential]::new($clientId, $clientSecret)
-
-      # ----------- Authenticate with Azure and Fabric ----------- #
+      # Directly login to Azure
       Write-Host "Logging in to Azure using Service Principal..."
-      Connect-AzAccount -ServicePrincipal -TenantId $tenantId -Credential $credential -ErrorAction Stop
+      Connect-AzAccount -ServicePrincipal -TenantId $tenantId -ApplicationId $clientId -CertificateThumbprint $clientSecret -ErrorAction Stop
 
+      Write-Host "Azure authentication successful."
+
+      # Optionally set Fabric Auth Token if required
       Write-Host "Setting Fabric authentication token..."
       Set-FabricAuthToken -servicePrincipalId $clientId `
-                          -servicePrincipalSecret ([System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($clientSecret))) `
+                          -servicePrincipalSecret $clientSecret `
                           -tenantId $tenantId -reset
 
-      Write-Host "Authentication successful!"
+      Write-Host "Authentication with Azure and Power BI Service completed successfully!"
+
 
 
 
