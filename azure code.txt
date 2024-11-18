@@ -46,6 +46,17 @@ steps:
           Write-Host "Module $module is already installed."
         }
       }
+# Debug Variables Step
+- task: PowerShell@2
+  displayName: 'Debug Variables'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Write-Host "Debugging Variables..."
+      Write-Host "TenantId: ${{ variables.tenantid }}"
+      Write-Host "ClientId: ${{ variables.clientid }}"
+      Write-Host "ClientSecret: (hidden for security)"
 
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
