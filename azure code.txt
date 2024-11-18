@@ -48,68 +48,25 @@ steps:
       }
 
 
+# Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
   inputs:
-    targetType: 'inline'
     pwsh: true
+    targetType: inline
     script: |
-      try {
-          Write-Host "Starting Power BI Service Authentication..."
-          
-          # Import Power BI Module explicitly without verbose output
-          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
-          
-          # Debug variables (will not show actual values)
-          Write-Host "Checking if variables are accessible..."
-          
-          # Explicitly convert and check variables before use
-          $clientSecretValue = [string]$($variables.Clientsecret)
-          $clientIdValue = [string]$($variables.clinetid)
-          $tenantIdValue = [string]$($variables.tenantid)
-          
-          # Validate variables
-          if ([string]::IsNullOrWhiteSpace($clientSecretValue)) {
-              throw "Client Secret is not properly accessed. Check variable configuration."
-          }
-          
-          if ([string]::IsNullOrWhiteSpace($clientIdValue)) {
-              throw "Client ID is not properly accessed. Check variable configuration."
-          }
-          
-          if ([string]::IsNullOrWhiteSpace($tenantIdValue)) {
-              throw "Tenant ID is not properly accessed. Check variable configuration."
-          }
-          
-          Write-Host "Variables validated successfully."
-          
-          # Create secure string with explicit string conversion
-          $secureSecret = ConvertTo-SecureString -String $clientSecretValue -AsPlainText -Force
-          
-          # Create credential object with explicit string values
-          $credential = New-Object System.Management.Automation.PSCredential `
-              -ArgumentList $clientIdValue, $secureSecret
-          
-          # Connect to Power BI
-          Write-Host "Attempting to connect to Power BI Service..."
-          Connect-PowerBIServiceAccount -ServicePrincipal `
-              -TenantId $tenantIdValue `
-              -Credential $credential `
-              -ErrorAction Stop
-              
-          Write-Host "Successfully authenticated with Power BI Service."
-          
-      } catch {
-          $errorMessage = $_.Exception.Message
-          Write-Error "Authentication Error: $errorMessage"
-          throw
-      } finally {
-          # Clear sensitive variables
-          if ($null -ne $secureSecret) { $secureSecret.Dispose() }
-          if ($null -ne $credential) { $credential = $null }
-          if ($null -ne $clientSecretValue) { $clientSecretValue = $null }
-          [System.GC]::Collect()
-      }
+      Write-Host "Authenticating with Power BI Service..."
+
+      # Directly use environment variables
+      $clientId = "${env:clientid}"
+      $clientSecret = "${env:clientsecret}" | ConvertTo-SecureString -AsPlainText -Force
+      $tenantId = "${env:tenantid}"
+
+      # Authenticate
+      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+
+      Write-Host "Authentication successful."
+
 
 
 
