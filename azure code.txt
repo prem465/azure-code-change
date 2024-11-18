@@ -186,24 +186,29 @@ steps:
 
 
 steps:
-  - script: |
-      if [ -z "$(clientId)" ]; then
-        echo "clientId is not set or empty."
-      else
-        echo "clientId is set."
-      fi
-
-      if [ -z "$(clientSecret)" ]; then
-        echo "clientSecret is not set or empty."
-      else
-        echo "clientSecret is set."
-      fi
-
-      if [ -z "$(tenantId)" ]; then
-        echo "tenantId is not set or empty."
-      else
-        echo "tenantId is set."
-      fi
+  - task: PowerShell@2
     displayName: 'Test Variable Values'
+    inputs:
+      targetType: inline
+      script: |
+        if (-not $env:clientId) {
+          Write-Output "clientId is not set or empty."
+        } else {
+          Write-Output "clientId is set."
+        }
+
+        if (-not $env:clientSecret) {
+          Write-Output "clientSecret is not set or empty."
+        } else {
+          Write-Output "clientSecret is set."
+        }
+
+        if (-not $env:tenantId) {
+          Write-Output "tenantId is not set or empty."
+        } else {
+          Write-Output "tenantId is set."
+        }
+
+
 
 
