@@ -177,3 +177,33 @@ steps:
       }
       Write-Host "Logs stored in: $(Pipeline.Workspace)/log.txt"
 
+
+
+
+
+---------------------------------------------------------------------------
+
+
+
+steps:
+  - script: |
+      if [ -z "$(clientId)" ]; then
+        echo "clientId is not set or empty."
+      else
+        echo "clientId is set."
+      fi
+
+      if [ -z "$(clientSecret)" ]; then
+        echo "clientSecret is not set or empty."
+      else
+        echo "clientSecret is set."
+      fi
+
+      if [ -z "$(tenantId)" ]; then
+        echo "tenantId is not set or empty."
+      else
+        echo "tenantId is set."
+      fi
+    displayName: 'Test Variable Values'
+
+
