@@ -28,11 +28,22 @@ steps:
     targetType: inline
     script: |
       Write-Host "Installing dependencies dynamically..."
-      $modules = @(${{ variables.MODULE_LIST }}.Split("`n"))
+      
+      # Convert the MODULE_LIST into an array
+      $modules = @(
+        "MicrosoftPowerBIMgmt"
+        "Invoke-DQVTesting"
+        "Invoke-SemanticModelRefresh"
+      )
+      
+      # Loop through the modules and install if missing
       foreach ($module in $modules) {
+        Write-Host "Checking module: $module"
         if (-not (Get-Module -ListAvailable -Name $module)) {
           Write-Host "Installing module: $module"
-          Install-Module -Name $module -Scope CurrentUser -Force
+          Install-Module -Name $module -Scope CurrentUser -Force -ErrorAction Stop
+        } else {
+          Write-Host "Module $module is already installed."
         }
       }
 
