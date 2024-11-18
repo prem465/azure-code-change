@@ -47,7 +47,7 @@ steps:
         }
       }
 
-steps:
+
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
   inputs:
@@ -58,51 +58,58 @@ steps:
           Write-Host "Starting Power BI Service Authentication..."
           
           # Import Power BI Module explicitly without verbose output
-          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop | Out-Null
+          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
           
-          # Create secure string without outputting the secret
-          $secureSecret = "$($variables.Clientsecret)" | ConvertTo-SecureString -AsPlainText -Force
+          # Debug variables (will not show actual values)
+          Write-Host "Checking if variables are accessible..."
           
-          if ([string]::IsNullOrEmpty($variables.Clientsecret)) {
-              throw "Client Secret is empty. Please check the variable configuration."
+          # Explicitly convert and check variables before use
+          $clientSecretValue = [string]$($variables.Clientsecret)
+          $clientIdValue = [string]$($variables.clinetid)
+          $tenantIdValue = [string]$($variables.tenantid)
+          
+          # Validate variables
+          if ([string]::IsNullOrWhiteSpace($clientSecretValue)) {
+              throw "Client Secret is not properly accessed. Check variable configuration."
           }
           
-          if ([string]::IsNullOrEmpty($variables.clinetid)) {
-              throw "Client ID is empty. Please check the variable configuration."
+          if ([string]::IsNullOrWhiteSpace($clientIdValue)) {
+              throw "Client ID is not properly accessed. Check variable configuration."
           }
           
-          if ([string]::IsNullOrEmpty($variables.tenantid)) {
-              throw "Tenant ID is empty. Please check the variable configuration."
+          if ([string]::IsNullOrWhiteSpace($tenantIdValue)) {
+              throw "Tenant ID is not properly accessed. Check variable configuration."
           }
           
-          # Create credential object
+          Write-Host "Variables validated successfully."
+          
+          # Create secure string with explicit string conversion
+          $secureSecret = ConvertTo-SecureString -String $clientSecretValue -AsPlainText -Force
+          
+          # Create credential object with explicit string values
           $credential = New-Object System.Management.Automation.PSCredential `
-              -ArgumentList "$($variables.clinetid)", $secureSecret
+              -ArgumentList $clientIdValue, $secureSecret
           
           # Connect to Power BI
+          Write-Host "Attempting to connect to Power BI Service..."
           Connect-PowerBIServiceAccount -ServicePrincipal `
-              -TenantId "$($variables.tenantid)" `
+              -TenantId $tenantIdValue `
               -Credential $credential `
-              -ErrorAction Stop | Out-Null
+              -ErrorAction Stop
               
           Write-Host "Successfully authenticated with Power BI Service."
           
       } catch {
-          # Log error without exposing sensitive details
           $errorMessage = $_.Exception.Message
-          if ($errorMessage -match "(password|secret|credential|key)") {
-              Write-Error "Authentication failed. Please check your credentials and try again."
-          } else {
-              Write-Error "Error during authentication: $errorMessage"
-          }
-          throw "Authentication failed. Please check logs for details."
+          Write-Error "Authentication Error: $errorMessage"
+          throw
       } finally {
           # Clear sensitive variables
-          if ($secureSecret) { $secureSecret.Dispose() }
-          if ($credential) { $credential = $null }
+          if ($null -ne $secureSecret) { $secureSecret.Dispose() }
+          if ($null -ne $credential) { $credential = $null }
+          if ($null -ne $clientSecretValue) { $clientSecretValue = $null }
           [System.GC]::Collect()
       }
-     
 
 
 
