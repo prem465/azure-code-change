@@ -202,154 +202,256 @@ steps:
   displayName: 'Checkout Repository'
 
 - task: PowerShell@2
-  displayName: 'Install Dependencies'
+  displayName: 'Install and Configure All Required Modules'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      # Install required modules
-      if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
-        Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
+      # Force TLS 1.2
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      
+      Write-Host "Setting up PowerShell Gallery..."
+      if (Get-PSRepository -Name "PSGallery") {
+          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+      } else {
+          Register-PSRepository -Default
+          Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
       }
-
-      Write-Host "##[debug] Installing MicrosoftPowerBIMgmt"
-      Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
-
-      # Create custom modules directory
-      if ((Test-Path -path ".\.nuget\custom_modules") -eq $false) {
-        New-Item -Name ".nuget\custom_modules" -Type Directory
+      
+      # Remove AzureRM if present
+      if (Get-Module -ListAvailable -Name AzureRM*) {
+          Write-Host "Removing AzureRM modules..."
+          Get-Module -ListAvailable -Name AzureRM* | ForEach-Object { 
+              try {
+                  Uninstall-Module -Name $_.Name -Force -ErrorAction SilentlyContinue
+              } catch {
+                  Write-Warning "Could not uninstall $_"
+              }
+          }
       }
-
-      # Download FabricPS-PBIP modules
-      @(
-        "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-        "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-      ) | ForEach-Object {
-        Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
+      
+      Write-Host "Installing required modules..."
+      $modules = @(
+          @{Name = "Az.Accounts"; AllowPrerelease = $false},
+          @{Name = "MicrosoftPowerBIMgmt"; AllowPrerelease = $false},
+          @{Name = "Invoke-DQVTesting"; AllowPrerelease = $true},
+          @{Name = "Invoke-SemanticModelRefresh"; AllowPrerelease = $true}
+      )
+      
+      foreach ($module in $modules) {
+          try {
+              if (-not (Get-Module -ListAvailable -Name $module.Name)) {
+                  Write-Host "Installing $($module.Name)..."
+                  Install-Module -Name $module.Name `
+                               -Force `
+                               -AllowClobber `
+                               -Scope CurrentUser `
+                               -Repository PSGallery `
+                               -AllowPrerelease:$module.AllowPrerelease `
+                               -ErrorAction Stop
+                  Write-Host "$($module.Name) installed successfully"
+              } else {
+                  Write-Host "$($module.Name) is already installed"
+              }
+          } catch {
+              Write-Error "Failed to install $($module.Name): $_"
+              throw
+          }
+      }
+      
+      # Create directory for custom modules
+      Write-Host "Setting up custom modules directory..."
+      $customModulePath = ".\.nuget\custom_modules"
+      New-Item -Path $customModulePath -ItemType Directory -Force
+      
+      # Download and set up FabricPS-PBIP module
+      $fabricPsUrls = @(
+          "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+          "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+      )
+      
+      foreach ($url in $fabricPsUrls) {
+          $fileName = Split-Path $url -Leaf
+          $outputPath = Join-Path $customModulePath $fileName
+          Invoke-WebRequest -Uri $url -OutFile $outputPath
       }
 
 - task: PowerShell@2
-  displayName: 'Authenticate and Deploy Changes'
+  displayName: 'Authenticate and Process Changes'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      # Import custom modules
-      Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-
-      # Setup credentials
-      $secret = "$(Clientsecret)" | ConvertTo-SecureString -AsPlainText -Force
-      $credential = [System.Management.Automation.PSCredential]::new("$(clinetid)", $secret)
-
-      # Check if service principal
-      $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-      $isServicePrincipal = $credential.UserName -match $guidRegex
-
-      # Set Fabric auth token
-      Write-Host "Setting Fabric authentication token..."
-      if ($isServicePrincipal) {
-        Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-          -servicePrincipalSecret ([System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))) `
-          -tenantId "$(tenentid)" -reset
-      }
-
-      # Connect to Power BI Service
-      Write-Host "##[debug] Connecting to Power BI Service"
-      $connectionStatus = Connect-PowerBIServiceAccount `
-        -ServicePrincipal `
-        -Credential $credential `
-        -TenantId "$(tenentid)"
-
-      # Identify Changes For Promotion
-      $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
-      $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
+      Write-Host "Starting Authentication Process..."
       
-      # Remove duplicates
-      $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
-      $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
-
-      # Handle Semantic Models
-      foreach ($change in $pbipDSChanges) {
-        Write-Host "Processing semantic model change: $change"
-        try {
-          # Get parent folder containing .pbism file
-          $parentFolder = Split-Path $change -Parent
-          while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbism"))) {
-            $parentFolder = Split-Path $parentFolder -Parent
-          }
-
-          if ($parentFolder) {
-            Write-Host "Promoting semantic model from: $parentFolder"
-            $item = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID -path $parentFolder
-            
-            if ($item) {
-              Write-Host "Successfully deployed semantic model to source workspace"
-              
-              # Validate the semantic model
-              Invoke-SemanticModelRefresh -WorkspaceId $env:SOURCE_WORKSPACE_ID `
-                -SemanticModelId $item.Id `
-                -Credential $credential `
-                -TenantId "$(tenentid)" `
-                -Environment Public `
-                -LogOutput "ADO"
-            }
-          }
-        }
-        catch {
-          Write-Error "Failed to process semantic model $change : $_"
-          throw
-        }
-      }
-
-      # Handle Reports
-      foreach ($change in $pbipRPTChanges) {
-        Write-Host "Processing report change: $change"
-        try {
-          # Get parent folder containing .pbir file
-          $parentFolder = Split-Path $change -Parent
-          while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbir"))) {
-            $parentFolder = Split-Path $parentFolder -Parent
-          }
-
-          if ($parentFolder) {
-            Write-Host "Promoting report from: $parentFolder"
-            
-            # Get report definition
-            $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
-            $semanticModelPath = (Get-Content $def.FullName | ConvertFrom-Json).datasetReference.byPath
-            
-            if ($semanticModelPath) {
-              $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
-              $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
-                Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
-
-              if ($metadataSM) {
-                $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
-                $semanticModelName = if ($metadataSM.Name -eq "item.metadata.json") {
-                  $content.displayName
-                } else {
-                  $content.metadata.displayName
-                }
-                
-                # Get semantic model ID from workspace
-                $items = Invoke-FabricAPIRequest -Uri "workspaces/$env:SOURCE_WORKSPACE_ID/items" -Method Get
-                $semanticModel = $items | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
-                
-                if ($semanticModel) {
-                  $promotedItem = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID -path $parentFolder -itemProperties @{ 
-                    semanticmodelId = $semanticModel.id 
+      try {
+          # Import required modules
+          Import-Module Az.Accounts
+          Import-Module MicrosoftPowerBIMgmt
+          Import-Module Invoke-DQVTesting
+          Import-Module Invoke-SemanticModelRefresh
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+          
+          Write-Host "Getting credentials from environment..."
+          # Get credentials from variables and create SecureString
+          $securePassword = ConvertTo-SecureString -String $env:CLIENTSECRET -AsPlainText -Force
+          
+          # Create PSCredential object
+          $credential = New-Object System.Management.Automation.PSCredential($env:CLIENTID, $securePassword)
+          
+          Write-Host "Connecting to Azure..."
+          # Connect to Azure
+          Connect-AzAccount -ServicePrincipal `
+                          -Credential $credential `
+                          -TenantId $env:TENANTID
+          
+          Write-Host "Connecting to Power BI..."
+          # Connect to Power BI
+          Connect-PowerBIServiceAccount -ServicePrincipal `
+                                      -Credential $credential `
+                                      -TenantId $env:TENANTID
+          
+          # Set Fabric auth token
+          Write-Host "Setting Fabric authentication token..."
+          Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
+                             -servicePrincipalSecret $env:CLIENTSECRET `
+                             -tenantId $env:TENANTID `
+                             -reset
+          
+          Write-Host "Successfully authenticated with all services"
+          
+          # Identify Changes For Promotion
+          Write-Host "Detecting changes..."
+          $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
+          $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
+          
+          # Remove duplicates
+          $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+          $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+          
+          # Handle Semantic Models
+          foreach ($change in $pbipDSChanges) {
+              Write-Host "Processing semantic model change: $change"
+              try {
+                  # Get parent folder containing .pbism file
+                  $parentFolder = Split-Path $change -Parent
+                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbism"))) {
+                      $parentFolder = Split-Path $parentFolder -Parent
                   }
-                  Write-Host "Successfully deployed report to source workspace"
-                }
+                  
+                  if ($parentFolder) {
+                      Write-Host "Promoting semantic model from: $parentFolder"
+                      $item = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID -path $parentFolder
+                      
+                      if ($item) {
+                          Write-Host "Successfully deployed semantic model to source workspace"
+                          
+                          # Validate the semantic model
+                          Write-Host "Validating semantic model..."
+                          Invoke-SemanticModelRefresh -ModelPath $change `
+                                                    -WorkspaceId $env:SOURCE_WORKSPACE_ID `
+                                                    -Credential $credential `
+                                                    -TenantId $env:TENANTID
+                                                    
+                          Write-Host "Semantic model validated successfully"
+                          
+                          # Copy to UAT workspace if validation successful
+                          Import-FabricItem -workspaceId $env:TARGET_WORKSPACE_ID -path $parentFolder
+                          Write-Host "Copied semantic model to UAT workspace"
+                      }
+                  }
               }
-            }
+              catch {
+                  Write-Error "Failed to process semantic model $change : $_"
+                  throw
+              }
           }
-        }
-        catch {
-          Write-Error "Failed to process report $change : $_"
+          
+          # Handle Reports
+          foreach ($change in $pbipRPTChanges) {
+              Write-Host "Processing report change: $change"
+              try {
+                  # Get parent folder containing .pbir file
+                  $parentFolder = Split-Path $change -Parent
+                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbir"))) {
+                      $parentFolder = Split-Path $parentFolder -Parent
+                  }
+                  
+                  if ($parentFolder) {
+                      Write-Host "Promoting report from: $parentFolder"
+                      
+                      # Get report definition
+                      $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
+                      $semanticModelPath = (Get-Content $def.FullName | ConvertFrom-Json).datasetReference.byPath
+                      
+                      if ($semanticModelPath) {
+                          $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
+                          $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
+                              Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or 
+                                          (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
+                          
+                          if ($metadataSM) {
+                              $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
+                              $semanticModelName = if ($metadataSM.Name -eq "item.metadata.json") {
+                                  $content.displayName
+                              } else {
+                                  $content.metadata.displayName
+                              }
+                              
+                              # Get semantic model ID from workspace
+                              $items = Invoke-FabricAPIRequest -Uri "workspaces/$env:SOURCE_WORKSPACE_ID/items" -Method Get
+                              $semanticModel = $items | Where-Object { 
+                                  $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName 
+                              }
+                              
+                              if ($semanticModel) {
+                                  # Deploy to source workspace
+                                  Write-Host "Deploying report to source workspace..."
+                                  $sourceItem = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID `
+                                                                -path $parentFolder `
+                                                                -itemProperties @{ 
+                                                                    semanticmodelId = $semanticModel.id 
+                                                                }
+                                  
+                                  # Run DQV Testing
+                                  Write-Host "Running Data Quality Validation..."
+                                  Invoke-DQVTesting -ReportPath $change `
+                                                  -WorkspaceId $env:SOURCE_WORKSPACE_ID `
+                                                  -Credential $credential `
+                                                  -TenantId $env:TENANTID
+                                  
+                                  # Deploy to UAT workspace
+                                  Write-Host "Deploying report to UAT workspace..."
+                                  Import-FabricItem -workspaceId $env:TARGET_WORKSPACE_ID `
+                                                  -path $parentFolder `
+                                                  -itemProperties @{ 
+                                                      semanticmodelId = $semanticModel.id 
+                                                  }
+                                  
+                                  Write-Host "Successfully deployed report to both workspaces"
+                              }
+                          }
+                      }
+                  }
+              }
+              catch {
+                  Write-Error "Failed to process report $change : $_"
+                  throw
+              }
+          }
+          
+          Write-Host "All changes processed successfully"
+          
+      } catch {
+          Write-Error "Process failed: $_"
           throw
-        }
       }
+  env:
+    CLIENTSECRET: $(Clientsecret)
+    CLIENTID: $(clinetid)
+    TENANTID: $(tenentid)
+    SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
+    TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
 
 - task: PowerShell@2
   displayName: 'Log Results'
@@ -357,9 +459,7 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      $dateTimeofRun = (Get-Date -Format "yyyy-MM-ddTHH-mm-ssZ")
-      $runGuid = (New-Guid).Guid
-      
-      "Deployment completed at $dateTimeofRun" | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-$runGuid.log"
-      "Run ID: $runGuid" | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment-$runGuid.log" -Append
-
+      $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+      $logEntry = "Deployment completed at $timestamp"
+      Write-Host $logEntry
+      $logEntry | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment.log" -Append
