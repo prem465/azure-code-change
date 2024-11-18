@@ -47,27 +47,61 @@ steps:
         }
       }
 
- # Step 3: Authenticate with Power BI Service
+steps:
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
   inputs:
+    targetType: 'inline'
     pwsh: true
-    targetType: inline
     script: |
-      Write-Host "Authenticating with Power BI Service..."
-      
-      # Import Power BI Module explicitly
-      Import-Module MicrosoftPowerBIMgmt
-      
-      # Secure Credential Setup
-      $secret = "${{ variables.Clientsecret }}" | ConvertTo-SecureString -AsPlainText -Force
-      $credential = [System.Management.Automation.PSCredential]::new("${{ variables.clinetid }}", $secret)
-
-      # Perform Authentication
-      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId "${{ variables.tenantid }}" `
-        -ClientId $credential.UserName -ClientSecret ($secret | ConvertFrom-SecureString -AsPlainText)
-
-      Write-Host "Authentication successful."
+      try {
+          Write-Host "Starting Power BI Service Authentication..."
+          
+          # Import Power BI Module explicitly without verbose output
+          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop | Out-Null
+          
+          # Create secure string without outputting the secret
+          $secureSecret = "$($variables.Clientsecret)" | ConvertTo-SecureString -AsPlainText -Force
+          
+          if ([string]::IsNullOrEmpty($variables.Clientsecret)) {
+              throw "Client Secret is empty. Please check the variable configuration."
+          }
+          
+          if ([string]::IsNullOrEmpty($variables.clinetid)) {
+              throw "Client ID is empty. Please check the variable configuration."
+          }
+          
+          if ([string]::IsNullOrEmpty($variables.tenantid)) {
+              throw "Tenant ID is empty. Please check the variable configuration."
+          }
+          
+          # Create credential object
+          $credential = New-Object System.Management.Automation.PSCredential `
+              -ArgumentList "$($variables.clinetid)", $secureSecret
+          
+          # Connect to Power BI
+          Connect-PowerBIServiceAccount -ServicePrincipal `
+              -TenantId "$($variables.tenantid)" `
+              -Credential $credential `
+              -ErrorAction Stop | Out-Null
+              
+          Write-Host "Successfully authenticated with Power BI Service."
+          
+      } catch {
+          # Log error without exposing sensitive details
+          $errorMessage = $_.Exception.Message
+          if ($errorMessage -match "(password|secret|credential|key)") {
+              Write-Error "Authentication failed. Please check your credentials and try again."
+          } else {
+              Write-Error "Error during authentication: $errorMessage"
+          }
+          throw "Authentication failed. Please check logs for details."
+      } finally {
+          # Clear sensitive variables
+          if ($secureSecret) { $secureSecret.Dispose() }
+          if ($credential) { $credential = $null }
+          [System.GC]::Collect()
+      }
      
 
 
