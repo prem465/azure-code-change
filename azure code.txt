@@ -49,26 +49,28 @@ steps:
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
+  env:
+    tenantid: ${{ variables.tenantid }}
+    clinetid: ${{ variables.clinetid }}
+    Clientsecret: ${{ variables.Clientsecret }}
   inputs:
     pwsh: true
     targetType: inline
     script: |
       Write-Host "Authenticating with Power BI Service..."
-
+      
       # Import Power BI Module explicitly
-      Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
-
-      # Perform Service Principal Authentication securely
-      Connect-PowerBIServiceAccount -ServicePrincipal `
-          -TenantId $env:tenantid `
-          -ClientId $env:clientid `
-          -ClientSecret $env:clientsecret
-
+      Import-Module MicrosoftPowerBIMgmt
+      
+      # Perform Service Principal Authentication using environment variables
+      $tenantId = $env:tenantid
+      $clientId = $env:clinetid
+      $clientSecret = $env:Clientsecret
+      
+      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+      
       Write-Host "Authentication successful."
-  env:
-    tenantid: ${{ variables.tenantid }}
-    clientid: ${{ variables.clientid }}
-    clientsecret: ${{ variables.clientsecret }}
+
 
 
 # Step 4: Detect Changes in Commit
