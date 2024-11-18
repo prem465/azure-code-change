@@ -28,9 +28,10 @@ steps:
     targetType: inline
     script: |
       Write-Host "Installing dependencies dynamically..."
-      
-      # Convert the MODULE_LIST into an array
+
+      # Include Az.Accounts module in the list
       $modules = @(
+        "Az.Accounts"
         "MicrosoftPowerBIMgmt"
         "Invoke-DQVTesting"
         "Invoke-SemanticModelRefresh"
@@ -46,8 +47,6 @@ steps:
           Write-Host "Module $module is already installed."
         }
       }
-
-
 # Step 3: Authenticate with Power BI Service
 - task: PowerShell@2
   displayName: 'Authenticate with Power BI Service'
@@ -57,15 +56,28 @@ steps:
     script: |
       Write-Host "Authenticating with Power BI Service..."
 
-      # Directly use environment variables
-      $clientId = "${env:clientid}"
-      $clientSecret = "${env:clientsecret}" | ConvertTo-SecureString -AsPlainText -Force
-      $tenantId = "${env:tenantid}"
+      # Setup variables for credentials
+      $clientSecret = "${{ variables.Clientsecret }}" | ConvertTo-SecureString -AsPlainText -Force
+      $clientId = "${{ variables.clinetid }}"
+      $tenantId = "${{ variables.tenantid }}"
 
-      # Authenticate
-      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -ClientId $clientId -ClientSecret $clientSecret
+      # Create a credential object
+      $credential = [System.Management.Automation.PSCredential]::new($clientId, $clientSecret)
 
-      Write-Host "Authentication successful."
+      # ----------- Authenticate with Azure and Fabric ----------- #
+      Write-Host "Logging in to Azure using Service Principal..."
+      Connect-AzAccount -ServicePrincipal -TenantId $tenantId -Credential $credential -ErrorAction Stop
+
+      Write-Host "Setting Fabric authentication token..."
+      Set-FabricAuthToken -servicePrincipalId $clientId `
+                          -servicePrincipalSecret ([System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($clientSecret))) `
+                          -tenantId $tenantId -reset
+
+      Write-Host "Authentication successful!"
+
+
+
+
 
 
 
