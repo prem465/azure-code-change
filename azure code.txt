@@ -202,53 +202,55 @@ steps:
   displayName: 'Checkout Repository'
 
 - task: PowerShell@2
-  displayName: 'Install Required Modules'
+  displayName: 'Setup PowerShell Environment'
   inputs:
     pwsh: true
     targetType: inline
     script: |
-      # Force TLS 1.2
       [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-      
-      Write-Host "Installing NuGet package provider..."
-      if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
-          Install-PackageProvider -Name NuGet -Force -Scope CurrentUser
-      }
-      
-      Write-Host "Configuring PSGallery..."
-      Register-PSRepository -Default -ErrorAction SilentlyContinue
-      Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-      
-      Write-Host "Installing Az.Accounts..."
-      if (-not (Get-Module -Name Az.Accounts -ListAvailable)) {
-          Install-Module -Name Az.Accounts -Repository PSGallery -Force -Scope CurrentUser -AllowClobber
-      }
-      
-      Write-Host "Installing MicrosoftPowerBIMgmt..."
-      if (-not (Get-Module -Name MicrosoftPowerBIMgmt -ListAvailable)) {
-          Install-Module -Name MicrosoftPowerBIMgmt -Repository PSGallery -Force -Scope CurrentUser -AllowClobber
-      }
-      
-      Write-Host "Installing DQV Testing module..."
-      if (-not (Get-Module -Name Invoke-DQVTesting -ListAvailable)) {
-          Install-Module -Name Invoke-DQVTesting -Repository PSGallery -Force -Scope CurrentUser -AllowClobber -AllowPrerelease
-      }
-      
-      Write-Host "Installing SemanticModelRefresh module..."
-      if (-not (Get-Module -Name Invoke-SemanticModelRefresh -ListAvailable)) {
-          Install-Module -Name Invoke-SemanticModelRefresh -Repository PSGallery -Force -Scope CurrentUser -AllowClobber -AllowPrerelease
-      }
-      
-      Write-Host "Setting up FabricPS-PBIP module..."
+      Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+      Install-Module PowerShellGet -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Az Module'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Power BI Modules'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Additional Modules'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name Invoke-DQVTesting -AllowPrerelease -Force -AllowClobber -Scope CurrentUser
+      Install-Module -Name Invoke-SemanticModelRefresh -AllowPrerelease -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Setup FabricPS Module'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
       $customModulePath = ".\.nuget\custom_modules"
       New-Item -Path $customModulePath -ItemType Directory -Force
       
-      $fabricPsUrls = @(
+      $urls = @(
           "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
           "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
       )
       
-      foreach ($url in $fabricPsUrls) {
+      foreach ($url in $urls) {
           $fileName = Split-Path $url -Leaf
           $outputPath = Join-Path $customModulePath $fileName
           Invoke-WebRequest -Uri $url -OutFile $outputPath -UseBasicParsing
@@ -260,44 +262,42 @@ steps:
     pwsh: true
     targetType: inline
     script: |
-      try {
-          Write-Host "Importing modules..."
-          Import-Module Az.Accounts -Force
-          Import-Module MicrosoftPowerBIMgmt -Force
-          Import-Module Invoke-DQVTesting -Force
-          Import-Module Invoke-SemanticModelRefresh -Force
-          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
-          
-          Write-Host "Setting up credentials..."
-          $securePassword = ConvertTo-SecureString -String $env:CLIENTSECRET -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential ($env:CLIENTID, $securePassword)
-          
-          Write-Host "Connecting to Azure..."
-          Connect-AzAccount -ServicePrincipal -Credential $credential -Tenant $env:TENANTID
-          
-          Write-Host "Connecting to Power BI..."
-          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -Tenant $env:TENANTID
-          
-          Write-Host "Setting Fabric authentication token..."
-          Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
-                             -servicePrincipalSecret $env:CLIENTSECRET `
-                             -tenantId $env:TENANTID `
-                             -reset
-          
-          # Process changes
-          $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
-          $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
-          
-          # Rest of your processing logic remains the same...
-          
-      } catch {
-          Write-Error "Process failed: $_"
-          throw
+      # Import modules
+      Import-Module Az.Accounts -Force
+      Import-Module MicrosoftPowerBIMgmt -Force
+      Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+      
+      # Setup credentials
+      $securePassword = ConvertTo-SecureString -String $env:CLIENTSECRET -AsPlainText -Force
+      $credential = New-Object System.Management.Automation.PSCredential ($env:CLIENTID, $securePassword)
+      
+      # Connect to services
+      Connect-AzAccount -ServicePrincipal -Credential $credential -Tenant $env:TENANTID
+      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -Tenant $env:TENANTID
+      
+      # Set Fabric token
+      Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
+                         -servicePrincipalSecret $env:CLIENTSECRET `
+                         -tenantId $env:TENANTID `
+                         -reset
+      
+      # Process changes
+      $changedFiles = git diff --name-only HEAD~1 HEAD
+      
+      foreach ($file in $changedFiles) {
+          if ($file -match "\.(pbix|pbit)$") {
+              Write-Host "Processing: $file"
+              $sourceItem = New-PowerBIReport -Path $file -WorkspaceId $env:SOURCE_WORKSPACE_ID
+              
+              Copy-PowerBIReport -WorkspaceId $env:SOURCE_WORKSPACE_ID `
+                               -ReportId $sourceItem.Id `
+                               -TargetWorkspaceId $env:TARGET_WORKSPACE_ID
+          }
       }
   env:
-    CLIENTSECRET: $(Clientsecret)    # Capital C
-    CLIENTID: $(clinetid)            # all lowercase
-    TENANTID: $(tenantid)            # all lowercase
+    CLIENTSECRET: $(Clientsecret)
+    CLIENTID: $(clinetid)
+    TENANTID: $(tenantid)
     SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
     TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
 
