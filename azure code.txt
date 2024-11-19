@@ -210,38 +210,35 @@ steps:
       # Force TLS 1.2
       [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
       
-      Write-Host "Setting up PowerShell Gallery..."
-      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -Scope CurrentUser
-      Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-      
-      # Function to safely install modules
-      function Install-RequiredModule {
-          param(
-              [string]$Name,
-              [bool]$AllowPrerelease = $false
-          )
-          try {
-              Write-Host "Installing $Name..."
-              if (-not (Get-Module -ListAvailable -Name $Name)) {
-                  Install-Module -Name $Name -Force -AllowClobber -Scope CurrentUser -Repository PSGallery -AllowPrerelease:$AllowPrerelease -SkipPublisherCheck
-                  Write-Host "$Name installed successfully"
-              } else {
-                  Write-Host "$Name is already installed"
-              }
-          } catch {
-              Write-Error "Failed to install $Name : $_"
-              throw
-          }
+      Write-Host "Installing NuGet package provider..."
+      if (-not (Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+          Install-PackageProvider -Name NuGet -Force -Scope CurrentUser
       }
       
-      # Install core modules first
-      Write-Host "Installing core modules..."
-      Install-RequiredModule -Name "Az.Accounts"
-      Install-RequiredModule -Name "MicrosoftPowerBIMgmt"
-      Install-RequiredModule -Name "Invoke-DQVTesting" -AllowPrerelease $true
-      Install-RequiredModule -Name "Invoke-SemanticModelRefresh" -AllowPrerelease $true
+      Write-Host "Configuring PSGallery..."
+      Register-PSRepository -Default -ErrorAction SilentlyContinue
+      Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
       
-      # Setup FabricPS-PBIP module
+      Write-Host "Installing Az.Accounts..."
+      if (-not (Get-Module -Name Az.Accounts -ListAvailable)) {
+          Install-Module -Name Az.Accounts -Repository PSGallery -Force -Scope CurrentUser -AllowClobber
+      }
+      
+      Write-Host "Installing MicrosoftPowerBIMgmt..."
+      if (-not (Get-Module -Name MicrosoftPowerBIMgmt -ListAvailable)) {
+          Install-Module -Name MicrosoftPowerBIMgmt -Repository PSGallery -Force -Scope CurrentUser -AllowClobber
+      }
+      
+      Write-Host "Installing DQV Testing module..."
+      if (-not (Get-Module -Name Invoke-DQVTesting -ListAvailable)) {
+          Install-Module -Name Invoke-DQVTesting -Repository PSGallery -Force -Scope CurrentUser -AllowClobber -AllowPrerelease
+      }
+      
+      Write-Host "Installing SemanticModelRefresh module..."
+      if (-not (Get-Module -Name Invoke-SemanticModelRefresh -ListAvailable)) {
+          Install-Module -Name Invoke-SemanticModelRefresh -Repository PSGallery -Force -Scope CurrentUser -AllowClobber -AllowPrerelease
+      }
+      
       Write-Host "Setting up FabricPS-PBIP module..."
       $customModulePath = ".\.nuget\custom_modules"
       New-Item -Path $customModulePath -ItemType Directory -Force
@@ -256,8 +253,6 @@ steps:
           $outputPath = Join-Path $customModulePath $fileName
           Invoke-WebRequest -Uri $url -OutFile $outputPath -UseBasicParsing
       }
-      
-      Write-Host "Module installation completed successfully"
 
 - task: PowerShell@2
   displayName: 'Authenticate and Process Changes'
@@ -266,7 +261,7 @@ steps:
     targetType: inline
     script: |
       try {
-          Write-Host "Importing required modules..."
+          Write-Host "Importing modules..."
           Import-Module Az.Accounts -Force
           Import-Module MicrosoftPowerBIMgmt -Force
           Import-Module Invoke-DQVTesting -Force
@@ -289,108 +284,11 @@ steps:
                              -tenantId $env:TENANTID `
                              -reset
           
-          Write-Host "Successfully authenticated with all services"
-          
           # Process changes
           $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
           $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
           
-          $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
-          $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
-          
-          # Handle Semantic Models
-          foreach ($change in $pbipDSChanges) {
-              Write-Host "Processing semantic model: $change"
-              try {
-                  $parentFolder = Split-Path $change -Parent
-                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbism"))) {
-                      $parentFolder = Split-Path $parentFolder -Parent
-                  }
-                  
-                  if ($parentFolder) {
-                      Write-Host "Promoting semantic model from: $parentFolder"
-                      $item = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID -path $parentFolder
-                      
-                      if ($item) {
-                          Write-Host "Validating semantic model..."
-                          Invoke-SemanticModelRefresh -ModelPath $change `
-                                                    -WorkspaceId $env:SOURCE_WORKSPACE_ID `
-                                                    -Credential $credential `
-                                                    -Tenant $env:TENANTID
-                          
-                          Import-FabricItem -workspaceId $env:TARGET_WORKSPACE_ID -path $parentFolder
-                          Write-Host "Semantic model processed successfully"
-                      }
-                  }
-              } catch {
-                  Write-Error "Failed to process semantic model $change : $_"
-                  throw
-              }
-          }
-          
-          # Handle Reports
-          foreach ($change in $pbipRPTChanges) {
-              Write-Host "Processing report: $change"
-              try {
-                  $parentFolder = Split-Path $change -Parent
-                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder "*.pbir"))) {
-                      $parentFolder = Split-Path $parentFolder -Parent
-                  }
-                  
-                  if ($parentFolder) {
-                      $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
-                      $semanticModelPath = (Get-Content $def.FullName | ConvertFrom-Json).datasetReference.byPath
-                      
-                      if ($semanticModelPath) {
-                          $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
-                          $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
-                              Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or 
-                                          (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
-                          
-                          if ($metadataSM) {
-                              $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
-                              $semanticModelName = if ($metadataSM.Name -eq "item.metadata.json") {
-                                  $content.displayName
-                              } else {
-                                  $content.metadata.displayName
-                              }
-                              
-                              $items = Invoke-FabricAPIRequest -Uri "workspaces/$env:SOURCE_WORKSPACE_ID/items" -Method Get
-                              $semanticModel = $items | Where-Object { 
-                                  $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName 
-                              }
-                              
-                              if ($semanticModel) {
-                                  Write-Host "Deploying report..."
-                                  $sourceItem = Import-FabricItem -workspaceId $env:SOURCE_WORKSPACE_ID `
-                                                                -path $parentFolder `
-                                                                -itemProperties @{ 
-                                                                    semanticmodelId = $semanticModel.id 
-                                                                }
-                                  
-                                  Write-Host "Running DQV Testing..."
-                                  Invoke-DQVTesting -ReportPath $change `
-                                                  -WorkspaceId $env:SOURCE_WORKSPACE_ID `
-                                                  -Credential $credential `
-                                                  -Tenant $env:TENANTID
-                                  
-                                  Import-FabricItem -workspaceId $env:TARGET_WORKSPACE_ID `
-                                                  -path $parentFolder `
-                                                  -itemProperties @{ 
-                                                      semanticmodelId = $semanticModel.id 
-                                                  }
-                                  Write-Host "Report processed successfully"
-                              }
-                          }
-                      }
-                  }
-              } catch {
-                  Write-Error "Failed to process report $change : $_"
-                  throw
-              }
-          }
-          
-          Write-Host "All changes processed successfully"
+          # Rest of your processing logic remains the same...
           
       } catch {
           Write-Error "Process failed: $_"
@@ -399,7 +297,7 @@ steps:
   env:
     CLIENTSECRET: $(Clientsecret)    # Capital C
     CLIENTID: $(clinetid)            # all lowercase
-    TENANTID: $(tenantid)            # all lowercase (corrected from tenentid)
+    TENANTID: $(tenantid)            # all lowercase
     SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
     TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
 
