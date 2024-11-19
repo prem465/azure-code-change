@@ -175,178 +175,144 @@ steps:
 
 
 
-steps:
-  - task: PowerShell@2
-    displayName: 'Test Variable Values'
-    inputs:
-      targetType: inline
-      script: |
-        if (-not $env:clientId) {
-          Write-Output "clientId is not set or empty."
-        } else {
-          Write-Output "clientId is set."
-        }
+parameters:
+  - name: WORKSPACE_NAME
+    displayName: "Workspace name to conduct tests?"
+    type: string
+    default: 'YourWorkspaceName'  # Replace with your default workspace name
 
-        if (-not $env:clientSecret) {
-          Write-Output "clientSecret is not set or empty."
-        } else {
-          Write-Output "clientSecret is set."
-        }
-
-        if (-not $env:tenantId) {
-          Write-Output "tenantId is not set or empty."
-        } else {
-          Write-Output "tenantId is set."
-        }
-
-
------------------------------------------------------------------------------
 trigger:
   branches:
     include:
-      - develop
+      - develop  # Update to the branch you want to trigger on
 
 pool:
   vmImage: 'windows-latest'
 
 variables:
-  group: powerbi  # Contains Clientsecret, clinetid, and tenantid
-  SOURCE_WORKSPACE_ID: "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d"
-  TARGET_WORKSPACE_ID: "a4628c7b-adda-4285-8c1f-758b19162d0b"
+  # Variable group with configuration
+  group: powerbi  # Contains Clientsecret, clinetid, tenantid
+  - name: WORKSPACE_NAME
+    value: '${{ parameters.WORKSPACE_NAME }}'
 
-steps:
-- checkout: self
-  fetchDepth: 0
-  displayName: 'Checkout Repository'
+jobs:
+  - job: Job1
+    displayName: "Automated Deployment and Testing Job"
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        displayName: 'Checkout Repository'
 
-- task: PowerShell@2
-  displayName: 'Install Dependencies'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      # ----------- Check if PowerShell Modules are Installed ----------- #
-      # Install Az.Accounts if Needed
-      if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
-        Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
-      }
+      - task: PowerShell@2
+        displayName: 'Install Dependencies'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            # ----------- Check if PowerShell Modules are Installed ----------- #
+            # Install Az.Accounts if Needed
+            if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
+              Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
+            }
 
-      Write-Host "##[debug] ----------- Install MicrosoftPowerBIMgmt -----------"
-      Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
+            Write-Host "##[debug] ----------- Install MicrosoftPowerBIMgmt -----------"
+            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
 
-      # Install Invoke-DQVTesting
-      Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
+            # Install Invoke-DQVTesting
+            Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
 
-      # Install Invoke-SemanticModelRefresh
-      Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
+            # Install Invoke-SemanticModelRefresh
+            Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
 
-      # Create a new directory in the current location
-      if ((Test-Path -path ".\.nuget\custom_modules") -eq $false) {
-        New-Item -Name ".nuget\custom_modules" -Type Directory -Force
-      }
+            # Create a new directory in the current location
+            if ((Test-Path -path ".\.nuget\custom_modules") -eq $false) {
+              New-Item -Name ".nuget\custom_modules" -Type Directory -Force
+            }
 
-      # For each url download and install in module folder
-      @(
-        "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-        "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-      ) | ForEach-Object {
-        Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
-      }
+            # For each URL, download and install in module folder
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
+            }
 
-- task: PowerShell@2
-  displayName: 'Authenticate and Process Changes'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      try {
-          # ----------- Import PowerShell Modules ----------- #
-          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
-          Import-Module Az.Accounts -Force
-          Import-Module MicrosoftPowerBIMgmt -Force
-          
-          Write-Host "Setting up authentication..."
-          # Clean any potential whitespace from tenant ID
-          $tenantId = $env:tenantid.Trim()
-          
-          if (-not $env:clinetid -or -not $env:Clientsecret -or -not $env:tenantid) {
-              Write-Error "Missing one or more required environment variables: clinetid, Clientsecret, tenantid"
-              throw
-          }
-          
-          Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+      - task: PowerShell@2
+        displayName: 'Deploy Changes and Conduct Testing'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                # ----------- Import PowerShell Modules ----------- #
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+                Import-Module Az.Accounts -Force
+                Import-Module MicrosoftPowerBIMgmt -Force
 
-          # Setup credentials
-          $secret = ${env:Clientsecret} | ConvertTo-SecureString -AsPlainText -Force
-          $credential = [System.Management.Automation.PSCredential]::new(${env:clinetid}.Trim(), $secret)
-          
-          # Determine if using a Service Principal
-          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-          $isServicePrincipal = $false
-          
-          if ($credential.UserName -match $guidRegex) {
-            $isServicePrincipal = $true
-          }
-          
-          # Connect to Azure
-          Write-Host "Connecting to Azure..."
-          if ($isServicePrincipal) {
-              Connect-AzAccount -ServicePrincipal `
-                                -Credential $credential `
-                                -TenantId $tenantId `
-                                -ErrorAction Stop
-          } else {
-              Connect-AzAccount -Credential $credential `
-                                -TenantId $tenantId `
-                                -ErrorAction Stop
-          }
-          
-          # Connect to Power BI
-          Write-Host "Connecting to Power BI..."
-          if ($isServicePrincipal) {
-              Connect-PowerBIServiceAccount -ServicePrincipal `
-                                            -Credential $credential `
-                                            -TenantId $tenantId `
-                                            -ErrorAction Stop
-          } else {
-              Connect-PowerBIServiceAccount -Credential $credential `
-                                            -TenantId $tenantId `
-                                            -ErrorAction Stop
-          }
-          
-          # Set Fabric authentication token
-          Write-Host "Setting Fabric authentication token..."
-          if ($isServicePrincipal) {
-            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-                                -servicePrincipalSecret $env:Clientsecret `
-                                -tenantId $tenantId -reset
-          } else {
-            Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
-          }
-          
-          # Process changes
-          Write-Host "Processing changes..."
-          $changedFiles = git diff --name-only HEAD~1 HEAD
-          
-          foreach ($file in $changedFiles) {
-              if ($file -match "\.(pbix|pbit)$") {
-                  Write-Host "Processing: $file"
-                  $sourceItem = New-PowerBIReport -Path $file -WorkspaceId $env:SOURCE_WORKSPACE_ID
-                  
-                  Copy-PowerBIReport -WorkspaceId $env:SOURCE_WORKSPACE_ID `
-                                     -ReportId $sourceItem.Id `
-                                     -TargetWorkspaceId $env:TARGET_WORKSPACE_ID
-              }
-          }
-      }
-      catch {
-          Write-Error "Authentication or processing failed: $_"
-          throw
-      }
-    env:
-      Clientsecret: $(Clientsecret)
-      clinetid: $(clinetid)
-      tenantid: $(tenantid)
-      SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
-      TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
+                # ----------- Setup Credentials ----------- #
+                $secret = ${env:Clientsecret} | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential (${env:clinetid}, $secret)
+
+                # Check if service principal or username/password
+                $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+                $isServicePrincipal = $false
+
+                if ($credential.UserName -match $guidRegex) {
+                  $isServicePrincipal = $true
+                }
+
+                # ----------- Login to Azure and Fabric ----------- #
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+
+                # Set Fabric Connection
+                if ($isServicePrincipal) {
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                    -servicePrincipalSecret $plainTextPwd `
+                    -tenantId ${env:tenantid} -reset
+                } else {
+                  Set-FabricAuthToken -credential $credential -tenantId ${env:tenantid} -reset
+                }
+
+                # ----------- Connect to Power BI ----------- #
+                if ($isServicePrincipal) {
+                  Connect-PowerBIServiceAccount -ServicePrincipal `
+                    -Credential $credential `
+                    -TenantId ${env:tenantid} -ErrorAction Stop
+                } else {
+                  Connect-PowerBIServiceAccount -Credential $credential `
+                    -TenantId ${env:tenantid} -ErrorAction Stop
+                }
+
+                # ----------- Process Changes ----------- #
+                Write-Host "Processing changes..."
+
+                # Identify changes for promotion
+                $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
+                $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
+                $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+                $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+                # Detect if no changes
+                if ($pbipDSChanges -eq $null -and $pbipRPTChanges -eq $null) {
+                    Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+                    exit 0
+                }
+
+                # Get workspace Id
+                $workspaceObj = Get-FabricWorkspace -workspaceName "${env:WORKSPACE_NAME}"
+                $workspaceID = $workspaceObj.Id
+
+                # Handle Semantic Models For Promotion
+                # [Rest of your deployment and testing script goes here]
+
+            } catch {
+                Write-Error "Authentication or processing failed: $_"
+                throw
+            }
+        env:
+          Clientsecret: $(Clientsecret)
+          clinetid: $(clinetid)
+          tenantid: $(tenantid)
+          WORKSPACE_NAME: $(WORKSPACE_NAME)
+
 
