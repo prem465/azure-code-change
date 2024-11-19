@@ -269,11 +269,17 @@ steps:
           Write-Host "Setting up authentication..."
           # Clean any potential whitespace from tenant ID
           $tenantId = $env:TENANTID.Trim()
-          Write-Host "Using tenant ID: $($tenantId.Substring(0,4))..." # Show only first 4 chars for security
           
+          if (-not $env:CLIENTID -or -not $env:CLIENTSECRET -or -not $env:TENANTID) {
+              Write-Error "Missing one or more required environment variables: CLIENTID, CLIENTSECRET, TENANTID"
+              throw
+          }
+          
+          Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+
           # Setup credentials
           $securePassword = ConvertTo-SecureString -String $env:CLIENTSECRET -AsPlainText -Force
-          $credential = New-Object System.Management.Automation.PSCredential ($env:CLIENTID, $securePassword)
+          $credential = New-Object System.Management.Automation.PSCredential ($env:CLIENTID.Trim(), $securePassword)
           
           # Connect to Azure with explicit tenant ID
           Write-Host "Connecting to Azure..."
@@ -291,7 +297,7 @@ steps:
           
           # Set Fabric token with explicit tenant ID
           Write-Host "Setting Fabric authentication token..."
-          Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
+          Set-FabricAuthToken -servicePrincipalId $env:CLIENTID.Trim() `
                              -servicePrincipalSecret $env:CLIENTSECRET `
                              -tenantId $tenantId `
                              -reset
@@ -320,15 +326,3 @@ steps:
     TENANTID: $(tenantid)
     SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
     TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
-
-- task: PowerShell@2
-  displayName: 'Log Results'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-      "Deployment completed at $timestamp" | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment.log" -Append
-
-
-
