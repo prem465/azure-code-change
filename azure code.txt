@@ -181,8 +181,6 @@ steps:
 
 
 -----------------------------------------------------------------------------
-
-
 trigger:
   branches:
     include:
@@ -197,7 +195,64 @@ variables:
   TARGET_WORKSPACE_ID: "a4628c7b-adda-4285-8c1f-758b19162d0b"
 
 steps:
-# Previous module installation steps remain the same...
+- checkout: self
+  fetchDepth: 0
+  displayName: 'Checkout Repository'
+
+- task: PowerShell@2
+  displayName: 'Setup PowerShell Environment'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+      Install-Module PowerShellGet -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Az Module'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Power BI Modules'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Install Additional Modules'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      Install-Module -Name Invoke-DQVTesting -AllowPrerelease -Force -AllowClobber -Scope CurrentUser
+      Install-Module -Name Invoke-SemanticModelRefresh -AllowPrerelease -Force -AllowClobber -Scope CurrentUser
+
+- task: PowerShell@2
+  displayName: 'Setup FabricPS Module'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      $customModulePath = ".\.nuget\custom_modules"
+      New-Item -Path $customModulePath -ItemType Directory -Force
+      
+      $urls = @(
+          "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+          "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+      )
+      
+      foreach ($url in $urls) {
+          $fileName = Split-Path $url -Leaf
+          $outputPath = Join-Path $customModulePath $fileName
+          Invoke-WebRequest -Uri $url -OutFile $outputPath -UseBasicParsing
+      }
 
 - task: PowerShell@2
   displayName: 'Authenticate and Process Changes'
@@ -206,95 +261,57 @@ steps:
     targetType: inline
     script: |
       try {
-          Write-Host "Starting authentication process..."
-          
-          # Import required modules
+          # Import modules
           Import-Module Az.Accounts -Force
           Import-Module MicrosoftPowerBIMgmt -Force
           Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
           
-          # Get tenant ID from variable and trim any whitespace
+          Write-Host "Setting up authentication..."
+          # Clean any potential whitespace from tenant ID
           $tenantId = $env:TENANTID.Trim()
-          Write-Host "Verifying tenant ID format..."
+          Write-Host "Using tenant ID: $($tenantId.Substring(0,4))..." # Show only first 4 chars for security
           
           # Setup credentials
           $securePassword = ConvertTo-SecureString -String $env:CLIENTSECRET -AsPlainText -Force
           $credential = New-Object System.Management.Automation.PSCredential ($env:CLIENTID, $securePassword)
           
-          # Azure Connection
+          # Connect to Azure with explicit tenant ID
           Write-Host "Connecting to Azure..."
-          try {
-              $azConnection = Connect-AzAccount -ServicePrincipal `
-                                              -Credential $credential `
-                                              -Tenant $tenantId `
-                                              -ErrorAction Stop
-              
-              Write-Host "Successfully connected to Azure"
-          }
-          catch {
-              Write-Error "Azure connection failed. Error: $_"
-              throw
-          }
+          Connect-AzAccount -ServicePrincipal `
+                          -Credential $credential `
+                          -Tenant $tenantId `
+                          -ErrorAction Stop
           
-          # Power BI Connection
+          # Connect to Power BI with explicit tenant ID
           Write-Host "Connecting to Power BI..."
-          try {
-              $pbiConnection = Connect-PowerBIServiceAccount -ServicePrincipal `
-                                                           -Credential $credential `
-                                                           -Tenant $tenantId `
-                                                           -ErrorAction Stop
-              
-              Write-Host "Successfully connected to Power BI"
-          }
-          catch {
-              Write-Error "Power BI connection failed. Error: $_"
-              throw
-          }
+          Connect-PowerBIServiceAccount -ServicePrincipal `
+                                      -Credential $credential `
+                                      -Tenant $tenantId `
+                                      -ErrorAction Stop
           
-          # Fabric Auth Token
+          # Set Fabric token with explicit tenant ID
           Write-Host "Setting Fabric authentication token..."
-          try {
-              Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
-                                 -servicePrincipalSecret $env:CLIENTSECRET `
-                                 -tenantId $tenantId `
-                                 -reset `
-                                 -ErrorAction Stop
-              
-              Write-Host "Successfully set Fabric auth token"
-          }
-          catch {
-              Write-Error "Fabric auth token setup failed. Error: $_"
-              throw
-          }
+          Set-FabricAuthToken -servicePrincipalId $env:CLIENTID `
+                             -servicePrincipalSecret $env:CLIENTSECRET `
+                             -tenantId $tenantId `
+                             -reset
           
           # Process changes
-          Write-Host "Processing Power BI files..."
           $changedFiles = git diff --name-only HEAD~1 HEAD
           
           foreach ($file in $changedFiles) {
               if ($file -match "\.(pbix|pbit)$") {
                   Write-Host "Processing: $file"
-                  try {
-                      $sourceItem = New-PowerBIReport -Path $file -WorkspaceId $env:SOURCE_WORKSPACE_ID
-                      Write-Host "Deployed to source workspace"
-                      
-                      Copy-PowerBIReport -WorkspaceId $env:SOURCE_WORKSPACE_ID `
-                                       -ReportId $sourceItem.Id `
-                                       -TargetWorkspaceId $env:TARGET_WORKSPACE_ID
-                      Write-Host "Copied to target workspace"
-                  }
-                  catch {
-                      Write-Error "Failed to process $file. Error: $_"
-                      throw
-                  }
+                  $sourceItem = New-PowerBIReport -Path $file -WorkspaceId $env:SOURCE_WORKSPACE_ID
+                  
+                  Copy-PowerBIReport -WorkspaceId $env:SOURCE_WORKSPACE_ID `
+                                   -ReportId $sourceItem.Id `
+                                   -TargetWorkspaceId $env:TARGET_WORKSPACE_ID
               }
           }
-          
-          Write-Host "All changes processed successfully"
-          
       }
       catch {
-          Write-Error "Process failed: $_"
+          Write-Error "Authentication or processing failed: $_"
           throw
       }
   env:
@@ -303,3 +320,15 @@ steps:
     TENANTID: $(tenantid)
     SOURCE_WORKSPACE_ID: $(SOURCE_WORKSPACE_ID)
     TARGET_WORKSPACE_ID: $(TARGET_WORKSPACE_ID)
+
+- task: PowerShell@2
+  displayName: 'Log Results'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+      "Deployment completed at $timestamp" | Out-File -FilePath "$(Build.ArtifactStagingDirectory)/deployment.log" -Append
+
+
+
