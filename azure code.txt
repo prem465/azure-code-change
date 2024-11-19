@@ -518,5 +518,360 @@ jobs:
           WORKSPACE_NAME: $(WORKSPACE_NAME)
 
 
+--------------------------------------------------------------------------------
+
+parameters:
+  - name: DEV_WORKSPACE_NAME
+    displayName: "Development Workspace Name"
+    type: string
+    default: 'YourDevWorkspaceName'  # Replace with your actual Dev workspace name
+
+  - name: UAT_WORKSPACE_NAME
+    displayName: "UAT Workspace Name"
+    type: string
+    default: 'YourUATWorkspaceName'  # Replace with your actual UAT workspace name
+
+trigger:
+  branches:
+    include:
+      - develop  # Update to the branch you want to trigger on
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: powerbi  # Contains Clientsecret, clinetid, tenantid
+  - name: DEV_WORKSPACE_NAME
+    value: '${{ parameters.DEV_WORKSPACE_NAME }}'
+  - name: UAT_WORKSPACE_NAME
+    value: '${{ parameters.UAT_WORKSPACE_NAME }}'
+
+jobs:
+  - job: Job1
+    displayName: "Automated Deployment and Testing Job"
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        displayName: 'Checkout Repository'
+
+      - task: PowerShell@2
+        displayName: 'Uninstall AzureRM Modules'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
+            Write-Host "AzureRM modules uninstalled."
+
+      - task: PowerShell@2
+        displayName: 'Install Dependencies'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            # ----------- Install Required PowerShell Modules ----------- #
+            if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
+              Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
+            }
+            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
+            Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
+            Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
+
+            # Create a custom modules directory
+            if (-not (Test-Path -Path ".\.nuget\custom_modules")) {
+              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
+            }
+
+            # Download FabricPS-PBIP module files
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
+            }
+
+      - task: PowerShell@2
+        displayName: 'Deploy Changes and Conduct Testing'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                # ----------- Import PowerShell Modules ----------- #
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+                Import-Module Az.Accounts -Force
+                Import-Module MicrosoftPowerBIMgmt -Force
+
+                # ----------- Setup Credentials ----------- #
+                if (-not ${env:clinetid} -or -not ${env:Clientsecret} -or -not ${env:tenantid}) {
+                    Write-Error "Missing one or more required environment variables: clinetid, Clientsecret, tenantid"
+                    throw
+                }
+
+                $secret = ${env:Clientsecret} | ConvertTo-SecureString -AsPlainText -Force
+                $credential = New-Object System.Management.Automation.PSCredential (${env:clinetid}, $secret)
+
+                # Clean any potential whitespace from tenant ID
+                $tenantId = ${env:tenantid}.Trim()
+
+                # Output partial values for debugging (do not expose sensitive information)
+                if ($tenantId.Length -ge 4) {
+                    Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+                } else {
+                    Write-Host "Tenant ID appears to be empty or too short."
+                }
+
+                if ($credential.UserName.Length -ge 4) {
+                    Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'"
+                } else {
+                    Write-Host "Client ID appears to be empty or too short."
+                }
+
+                # Check if service principal or username/password
+                $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+                $isServicePrincipal = $false
+
+                if ($credential.UserName -match $guidRegex) {
+                  $isServicePrincipal = $true
+                }
+
+                # ----------- Login to Azure and Fabric ----------- #
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                )
+
+                # Set Fabric Connection
+                if ($isServicePrincipal) {
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                    -servicePrincipalSecret $plainTextPwd `
+                    -tenantId $tenantId -reset
+                } else {
+                  Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+                }
+
+                # ----------- Connect to Power BI ----------- #
+                if ($isServicePrincipal) {
+                  Connect-PowerBIServiceAccount -ServicePrincipal `
+                    -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop
+                } else {
+                  Connect-PowerBIServiceAccount -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop
+                }
+
+                # ----------- Process Changes ----------- #
+                Write-Host "Processing changes..."
+
+                # Identify changes for promotion
+                $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Dataset/**/*.SemanticModel/**')
+                $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '*.Report/**')
+                $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+                $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+                # Detect if no changes
+                if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
+                    Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+                    exit 0
+                }
+
+                # Get Dev and UAT workspace IDs
+                $devWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:DEV_WORKSPACE_NAME}"
+                $devWorkspaceID = $devWorkspaceObj.Id
+
+                $uatWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:UAT_WORKSPACE_NAME}"
+                $uatWorkspaceID = $uatWorkspaceObj.Id
+
+                # ----------- Promote Semantic Models to UAT Workspace ----------- #
+                # Identify Semantic Models changed
+                $smPathsToPromote = @()
+                $filter = "*.pbism"
+
+                foreach ($change in $pbipDSChanges) {
+                    $parentFolder = Split-Path $change -Parent
+                    while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                        $parentFolder = Split-Path $parentFolder -Parent
+                    }
+                    if ($parentFolder -ne $null) {
+                        $smPathsToPromote += $parentFolder
+                    }
+                }
+
+                # Remove duplicates
+                $smPathsToPromote = $smPathsToPromote | Sort-Object -Unique
+
+                # Setup promoted items array
+                $smPromotedItems = @()
+
+                # Promote semantic models to UAT workspace
+                foreach ($promotePath in $smPathsToPromote) {
+                    Write-Host "##[debug]Promoting semantic model at $($promotePath) to UAT workspace ${env:UAT_WORKSPACE_NAME}"
+                    $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath
+                    $smPromotedItems += $smPromotedItem
+                }
+
+                # ----------- Retrieve Items in UAT Workspace ----------- #
+                $items = Invoke-FabricAPIRequest -Uri "workspaces/${uatWorkspaceID}/items" -Method Get
+
+                # ----------- Promote Reports to UAT Workspace ----------- #
+                # Identify Reports changed
+                $rptPathsToPromote = @()
+                $filter = "*.pbir"
+
+                foreach ($change in $pbipRPTChanges) {
+                    $parentFolder = Split-Path $change -Parent
+                    while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                        $parentFolder = Split-Path $parentFolder -Parent
+                    }
+                    if ($parentFolder -ne $null) {
+                        $rptPathsToPromote += $parentFolder
+                    }
+                }
+
+                # Remove duplicates
+                $rptPathsToPromote = $rptPathsToPromote | Sort-Object -Unique
+
+                # Setup promoted items array
+                $rptPromotedItems = @()
+
+                Write-Host "##[debug] rptPathsToPromote: $($rptPathsToPromote)"
+
+                # Promote reports to UAT workspace
+                foreach ($promotePath in $rptPathsToPromote) {
+                    # Get report definition
+                    $def = Get-ChildItem -Path $promotePath -Recurse -Include "definition.pbir"
+                    $semanticModelPath = (Get-Content $def.FullName | ConvertFrom-Json).datasetReference.byPath
+
+                    Write-Host "##[debug] SemanticModelPath: $($semanticModelPath)"
+
+                    # If byPath was null, we'll assume byConnection is set and skip
+                    if ($semanticModelPath -ne $null) {
+                        # Semantic Model path is relative to the report path, Join-Path can handle relative paths
+                        $pathToCheck = Join-Path $promotePath $semanticModelPath.path
+                        $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
+                                      Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
+
+                        if ($metadataSM -ne $null) {
+                            $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
+
+                            # Handle item.metadata.json
+                            if ($metadataSM.Name -eq "item.metadata.json") {
+                                # Prior to March-2024 release
+                                $semanticModelName = $content.displayName
+                                Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
+                            } else {
+                                $semanticModelName = $content.metadata.displayName
+                                Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
+                            }
+                        } else {
+                            Write-Host "##[error] Semantic Model definition not found."
+                            continue
+                        }
+                    }
+
+                    # Get the semantic model id from items in the UAT workspace
+                    $semanticModel = $items | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
+
+                    Write-Host "##[debug] semanticModel: $($semanticModel)"
+
+                    if (!$semanticModel) {
+                        Write-Host "##[error] Semantic Model not found in UAT workspace."
+                        continue
+                    } else {
+                        # Import report with appropriate semantic model id
+                        Write-Host "##[debug] Promoting report at $($promotePath) to UAT workspace ${env:UAT_WORKSPACE_NAME}"
+                        $promotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -itemProperties @{ semanticmodelId = "$($semanticModel.id)" }
+                        $rptPromotedItems += $promotedItem
+                    }
+                }
+
+                # ----------- Run Refreshes and Tests in UAT Workspace ----------- #
+
+                # Generate Run GUID
+                $runGuid = (New-Guid).Guid
+                $projectName = $($env:SYSTEM_TEAMPROJECT)
+                $repoName = $($env:BUILD_REPOSITORY_NAME)
+                $branchName = $($env:BUILD_SOURCEBRANCHNAME)
+                $userName = "$($env:BUILD_REQUESTEDFOREMAIL)"
+                $buildReason = "$($env:BUILD_REASON)"
+
+                if ($buildReason -eq 'schedule' -or $buildReason -eq 'ScheduleForced') {
+                    $userName = "Scheduled - Build-Agent"
+                }
+
+                Write-Host "##[debug]Run GUID: $($runGuid)"
+                Write-Host "##[debug]Project Name: $($projectName)"
+                Write-Host "##[debug]Repository Name: $($repoName)"
+                Write-Host "##[debug]Branch Name: $($branchName)"
+                Write-Host "##[debug]User Name: $($userName)"
+
+                $idqVersion = (Get-Module -Name "Invoke-DQVTesting" -ListAvailable).Version.toString()
+                $testResults = @()
+
+                # Get UTC representation of run
+                $dateTimeofRun = (Get-Date -Format "yyyy-MM-ddTHH-mm-ssZ")
+                $fileName = "$($dateTimeofRun)-$($runGuid).csv"
+
+                # Run synchronous refresh for each semantic model in UAT workspace
+                foreach ($promotedItem in $smPromotedItems) {
+                    Invoke-SemanticModelRefresh -WorkspaceId $uatWorkspaceID `
+                        -SemanticModelId $promotedItem.Id `
+                        -Credential $credential `
+                        -TenantId $tenantId `
+                        -Environment Public `
+                        -LogOutput "ADO"
+                }
+
+                # Run tests for functionality and data accuracy in UAT workspace
+                foreach ($promotedItem in $smPromotedItems) {
+                    $testResults += Invoke-DQVTesting -WorkspaceName "${env:UAT_WORKSPACE_NAME}" `
+                        -Credential $credential `
+                        -TenantId $tenantId `
+                        -DatasetId $promotedItem.Id `
+                        -LogOutput "Table"
+                }
+
+                # Add additional properties to the array of objects
+                $i = 0
+
+                $testResults | ForEach-Object {
+                    Add-Member -InputObject $_ -Name "BranchName" -Value $branchName -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "RepositoryName" -Value $repoName -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "ProjectName" -Value $projectName -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "UserName" -Value $userName -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "RunID" -Value $runGuid -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "Order" -Value $i -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "RunDateTime" -Value $dateTimeofRun -MemberType NoteProperty
+                    Add-Member -InputObject $_ -Name "InvokeDQTestingVersion" -Value $idqVersion -MemberType NoteProperty
+                    $i++
+                }
+
+                $testResults | Select-Object * | Export-Csv -Path ".\$fileName"
+
+                $getAbsPath = (Resolve-Path ".\$fileName").Path
+
+                Write-Host "##[debug] Test Results saved locally to $($getAbsPath)."
+
+                # Output test results
+                $testResults | ForEach-Object {
+                    $prefix = "##[debug]"
+                    switch ($_.LogType) {
+                        'Warning' { $prefix = "##vso[task.logissue type=warning]" }
+                        'Error' { $prefix = "##vso[task.logissue type=error]" }
+                        'Failure' { $prefix = "##vso[task.complete result=Failed;]" }
+                        'Success' { $prefix = "##vso[task.complete result=Succeeded;]" }
+                    }
+                    Write-Host "$($prefix)$($_.Message)"
+                }
+
+            } catch {
+                Write-Error "Authentication or processing failed: $_"
+                throw
+            }
+        env:
+          Clientsecret: $(Clientsecret)
+          clinetid: $(clinetid)
+          tenantid: $(tenantid)
+          DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
 
 
