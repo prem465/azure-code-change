@@ -190,8 +190,7 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  # Variable group with configuration
-  group: powerbi  # Contains Clientsecret, clinetid, tenantid
+  - group: powerbi  # Contains Clientsecret, clinetid, tenantid
   - name: WORKSPACE_NAME
     value: '${{ parameters.WORKSPACE_NAME }}'
 
@@ -202,6 +201,15 @@ jobs:
       - checkout: self
         fetchDepth: 0
         displayName: 'Checkout Repository'
+
+      - task: PowerShell@2
+        displayName: 'Uninstall AzureRM Modules'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
+            Write-Host "AzureRM modules uninstalled."
 
       - task: PowerShell@2
         displayName: 'Install Dependencies'
@@ -253,6 +261,18 @@ jobs:
                 $secret = ${env:Clientsecret} | ConvertTo-SecureString -AsPlainText -Force
                 $credential = New-Object System.Management.Automation.PSCredential (${env:clinetid}, $secret)
 
+                if (-not ${env:clinetid} -or -not ${env:Clientsecret} -or -not ${env:tenantid}) {
+                    Write-Error "Missing one or more required environment variables: clinetid, Clientsecret, tenantid"
+                    throw
+                }
+
+                # Clean any potential whitespace from tenant ID
+                $tenantId = ${env:tenantid}.Trim()
+
+                # Output partial values for debugging
+                Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 8))...'"
+                Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 8))...'"
+
                 # Check if service principal or username/password
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
                 $isServicePrincipal = $false
@@ -262,25 +282,27 @@ jobs:
                 }
 
                 # ----------- Login to Azure and Fabric ----------- #
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                  [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                )
 
                 # Set Fabric Connection
                 if ($isServicePrincipal) {
                   Set-FabricAuthToken -servicePrincipalId $credential.UserName `
                     -servicePrincipalSecret $plainTextPwd `
-                    -tenantId ${env:tenantid} -reset
+                    -tenantId $tenantId -reset
                 } else {
-                  Set-FabricAuthToken -credential $credential -tenantId ${env:tenantid} -reset
+                  Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
                 }
 
                 # ----------- Connect to Power BI ----------- #
                 if ($isServicePrincipal) {
                   Connect-PowerBIServiceAccount -ServicePrincipal `
                     -Credential $credential `
-                    -TenantId ${env:tenantid} -ErrorAction Stop
+                    -TenantId $tenantId -ErrorAction Stop
                 } else {
                   Connect-PowerBIServiceAccount -Credential $credential `
-                    -TenantId ${env:tenantid} -ErrorAction Stop
+                    -TenantId $tenantId -ErrorAction Stop
                 }
 
                 # ----------- Process Changes ----------- #
@@ -293,7 +315,7 @@ jobs:
                 $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
 
                 # Detect if no changes
-                if ($pbipDSChanges -eq $null -and $pbipRPTChanges -eq $null) {
+                if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
                     Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
                     exit 0
                 }
@@ -314,5 +336,6 @@ jobs:
           clinetid: $(clinetid)
           tenantid: $(tenantid)
           WORKSPACE_NAME: $(WORKSPACE_NAME)
+
 
 
