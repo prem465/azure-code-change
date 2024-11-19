@@ -19,7 +19,27 @@ steps:
 # Step 1: Checkout Repository
 - checkout: self
   displayName: 'Checkout Repository'
+- task: PowerShell@2
+  displayName: 'Setup PowerShell Environment'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+      Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
+      Install-Module PowerShellGet -Force -AllowClobber -Scope CurrentUser
 
+- task: PowerShell@2
+  displayName: 'Remove AzureRM Module if Loaded and Install Az Module'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      # Remove any AzureRM module that might be loaded in the session
+      Get-Module AzureRM* -ListAvailable | Remove-Module -Force -ErrorAction SilentlyContinue
+
+      # Install Az Module explicitly to avoid conflicts
+      Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
 # Step 2: Install Dependencies Dynamically
 - task: PowerShell@2
   displayName: 'Install Required Modules'
