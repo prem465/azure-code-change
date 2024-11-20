@@ -873,5 +873,459 @@ jobs:
           tenantid: $(tenantid)
           DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+______________________________________________________________________________--trigger:
+  branches:
+    include:
+      - develop
 
+variables:
+  - group: powerbi  # Contains Clientsecret, clinetid, tenantid
+
+parameters:
+  - name: DEV_WORKSPACE_NAME
+    type: string
+    default: 'Your_Dev_Workspace_Name'
+  - name: UAT_WORKSPACE_NAME
+    type: string
+    default: 'Your_UAT_Workspace_Name'
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- checkout: self
+  fetchDepth: 0
+  displayName: 'Checkout Repository'
+
+- task: PowerShell@2
+  displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+  inputs:
+    targetType: 'inline'
+    script: |
+      try {
+          # ----------- Import PowerShell Modules ----------- #
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
+
+          # ----------- Setup Credentials ----------- #
+          if (-not $env:clinetid -or -not $env:Clientsecret -or -not $env:tenantid) {
+              Write-Error "Missing one or more required environment variables: clinetid, Clientsecret, tenantid"
+              throw
+          }
+
+          $tenantId = $env:tenantid.Trim()
+          $clientId = $env:clinetid.Trim()
+          $clientSecret = $env:Clientsecret.Trim()
+
+          # Optional debugging checks (avoid printing sensitive data)
+          if ($tenantId) {
+              Write-Host "Tenant ID is set."
+          } else {
+              Write-Error "Tenant ID is not set."
+              throw
+          }
+
+          if ($clientId) {
+              Write-Host "Client ID is set."
+          } else {
+              Write-Error "Client ID is not set."
+              throw
+          }
+
+          if ($clientSecret) {
+              Write-Host "Client Secret is set."
+          } else {
+              Write-Error "Client Secret is not set."
+              throw
+          }
+
+          # Convert client secret to secure string
+          $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential ($clientId, $secureSecret)
+
+          # Check if service principal or username/password
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
+
+          if ($credential.UserName -match $guidRegex) {
+            $isServicePrincipal = $true
+          }
+
+          # ----------- Login to Azure and Fabric ----------- #
+          $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          )
+
+          # Set Fabric Connection
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+              -servicePrincipalSecret $plainTextPwd `
+              -tenantId $tenantId -reset
+          } else {
+            Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+          }
+
+          # ----------- Connect to Power BI ----------- #
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal `
+              -Credential $credential `
+              -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential `
+              -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+          }
+
+          Write-Host "Authentication successful."
+
+          # ----------- Process Changes ----------- #
+          Write-Host "Processing changes..."
+
+          # Get list of files changed in the current commit
+          $changedFiles = @(git diff-tree --no-commit-id --name-only -r $env:BUILD_SOURCEVERSION)
+
+          Write-Host "##[debug]Changed files: $($changedFiles)"
+
+          # Identify Semantic Model changes
+          $pbipDSChanges = $changedFiles | Where-Object { $_ -like '*.pbism' }
+
+          # Identify Report changes
+          $pbipRPTChanges = $changedFiles | Where-Object { $_ -like '*.pbir' }
+
+          $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+          $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+          # Output detected changes for debugging
+          Write-Host "##[debug]Detected Semantic Model Changes: $($pbipDSChanges)"
+          Write-Host "##[debug]Detected Report Changes: $($pbipRPTChanges)"
+
+          # Detect if no changes
+          if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
+              Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+              exit 0
+          }
+
+          # ----------- Get Workspace IDs ----------- #
+          $devWorkspaceName = "$env:DEV_WORKSPACE_NAME".Trim()
+          $uatWorkspaceName = "$env:UAT_WORKSPACE_NAME".Trim()
+
+          $devWorkspaceObj = Get-FabricWorkspace -workspaceName $devWorkspaceName
+          $uatWorkspaceObj = Get-FabricWorkspace -workspaceName $uatWorkspaceName
+
+          if (-not $devWorkspaceObj) {
+              Write-Error "Dev workspace '$devWorkspaceName' not found."
+              throw
+          }
+
+          if (-not $uatWorkspaceObj) {
+              Write-Error "UAT workspace '$uatWorkspaceName' not found."
+              throw
+          }
+
+          $devWorkspaceID = $devWorkspaceObj.WorkspaceId
+          $uatWorkspaceID = $uatWorkspaceObj.WorkspaceId
+
+          # ----------- Promote Changes ----------- #
+          # Prepare paths to promote
+          $smPathsToPromote = @()
+          foreach ($change in $pbipDSChanges) {
+              $smPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+          }
+
+          $rptPathsToPromote = @()
+          foreach ($change in $pbipRPTChanges) {
+              $rptPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+          }
+
+          # Import Semantic Models
+          foreach ($promotePath in $smPathsToPromote) {
+              try {
+                  Write-Host "Promoting semantic model at $promotePath to UAT workspace $uatWorkspaceName"
+                  $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+              } catch {
+                  Write-Error "Failed to promote semantic model at $promotePath: $_"
+                  throw
+              }
+          }
+
+          # Import Reports
+          foreach ($promotePath in $rptPathsToPromote) {
+              try {
+                  Write-Host "Promoting report at $promotePath to UAT workspace $uatWorkspaceName"
+                  $rptPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+              } catch {
+                  Write-Error "Failed to promote report at $promotePath: $_"
+                  throw
+              }
+          }
+
+          Write-Host "Promotion of changes to UAT workspace completed successfully."
+
+          # ----------- DQV Testing ----------- #
+          Write-Host "Starting Data Quality Validation (DQV) testing..."
+
+          # Assume you have a DQV script or function to execute
+          # Replace the following with your actual DQV testing commands
+
+          try {
+              # Example DQV Testing Command
+              # Replace with your actual DQV testing logic
+              Invoke-DQVTest -workspaceId $uatWorkspaceID -Verbose -Debug
+              Write-Host "DQV testing completed successfully."
+          } catch {
+              Write-Error "DQV testing failed: $_"
+              throw
+          }
+
+          # ----------- Validate Data Refresh ----------- #
+          Write-Host "Validating data refresh..."
+
+          try {
+              # Example Data Refresh Command
+              # Replace with your actual data refresh logic
+              Invoke-SemanticModelRefresh -workspaceId $uatWorkspaceID -RefreshType Full -Wait -Verbose -Debug
+              Write-Host "Data refresh validated successfully."
+          } catch {
+              Write-Error "Data refresh validation failed: $_"
+              throw
+          }
+
+          Write-Host "All steps completed successfully."
+
+      } catch {
+          Write-Error "An error occurred: $_"
+          throw
+      }
+  env:
+    DEV_WORKSPACE_NAME: ${{ parameters.DEV_WORKSPACE_NAME }}
+    UAT_WORKSPACE_NAME: ${{ parameters.UAT_WORKSPACE_NAME }}
+
+--------------------------------------------------------------------------------------
+
+trigger:
+  branches:
+    include:
+      - develop
+
+variables:
+  - group: powerbi  # Contains Clientsecret, clinetid, tenantid
+
+parameters:
+  - name: DEV_WORKSPACE_NAME
+    type: string
+    default: 'Your_Dev_Workspace_Name'
+  - name: UAT_WORKSPACE_NAME
+    type: string
+    default: 'Your_UAT_Workspace_Name'
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+- checkout: self
+  fetchDepth: 0
+  displayName: 'Checkout Repository'
+
+- task: PowerShell@2
+  displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+  inputs:
+    targetType: 'inline'
+    script: |
+      try {
+          # ----------- Import PowerShell Modules ----------- #
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psm1" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
+
+          # ----------- Setup Credentials ----------- #
+          if (-not $env:clinetid -or -not $env:Clientsecret -or -not $env:tenantid) {
+              Write-Error "Missing one or more required environment variables: clinetid, Clientsecret, tenantid"
+              throw
+          }
+
+          $tenantId = $env:tenantid.Trim()
+          $clientId = $env:clinetid.Trim()
+          $clientSecret = $env:Clientsecret.Trim()
+
+          # Optional debugging checks (avoid printing sensitive data)
+          if ($tenantId) {
+              Write-Host "Tenant ID is set."
+          } else {
+              Write-Error "Tenant ID is not set."
+              throw
+          }
+
+          if ($clientId) {
+              Write-Host "Client ID is set."
+          } else {
+              Write-Error "Client ID is not set."
+              throw
+          }
+
+          if ($clientSecret) {
+              Write-Host "Client Secret is set."
+          } else {
+              Write-Error "Client Secret is not set."
+              throw
+          }
+
+          # Convert client secret to secure string
+          $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+          $credential = New-Object System.Management.Automation.PSCredential ($clientId, $secureSecret)
+
+          # Check if service principal or username/password
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
+
+          if ($credential.UserName -match $guidRegex) {
+            $isServicePrincipal = $true
+          }
+
+          # ----------- Login to Azure and Fabric ----------- #
+          $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+            [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          )
+
+          # Set Fabric Connection
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+              -servicePrincipalSecret $plainTextPwd `
+              -tenantId $tenantId -reset
+          } else {
+            Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+          }
+
+          # ----------- Connect to Power BI ----------- #
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal `
+              -Credential $credential `
+              -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential `
+              -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+          }
+
+          Write-Host "Authentication successful."
+
+          # ----------- Process Changes ----------- #
+          Write-Host "Processing changes..."
+
+          # Get list of files changed in the current commit
+          $changedFiles = @(git diff-tree --no-commit-id --name-only -r $env:BUILD_SOURCEVERSION)
+
+          Write-Host "##[debug]Changed files: $($changedFiles)"
+
+          # Identify Semantic Model changes
+          $pbipDSChanges = $changedFiles | Where-Object { $_ -like '*.pbism' }
+
+          # Identify Report changes
+          $pbipRPTChanges = $changedFiles | Where-Object { $_ -like '*.pbir' }
+
+          $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+          $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+          # Output detected changes for debugging
+          Write-Host "##[debug]Detected Semantic Model Changes: $($pbipDSChanges)"
+          Write-Host "##[debug]Detected Report Changes: $($pbipRPTChanges)"
+
+          # Detect if no changes
+          if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
+              Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+              exit 0
+          }
+
+          # ----------- Get Workspace IDs ----------- #
+          $devWorkspaceName = "$env:DEV_WORKSPACE_NAME".Trim()
+          $uatWorkspaceName = "$env:UAT_WORKSPACE_NAME".Trim()
+
+          $devWorkspaceObj = Get-FabricWorkspace -workspaceName $devWorkspaceName
+          $uatWorkspaceObj = Get-FabricWorkspace -workspaceName $uatWorkspaceName
+
+          if (-not $devWorkspaceObj) {
+              Write-Error "Dev workspace '$devWorkspaceName' not found."
+              throw
+          }
+
+          if (-not $uatWorkspaceObj) {
+              Write-Error "UAT workspace '$uatWorkspaceName' not found."
+              throw
+          }
+
+          $devWorkspaceID = $devWorkspaceObj.WorkspaceId
+          $uatWorkspaceID = $uatWorkspaceObj.WorkspaceId
+
+          # ----------- Promote Changes ----------- #
+          # Prepare paths to promote
+          $smPathsToPromote = @()
+          foreach ($change in $pbipDSChanges) {
+              $smPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+          }
+
+          $rptPathsToPromote = @()
+          foreach ($change in $pbipRPTChanges) {
+              $rptPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+          }
+
+          # Import Semantic Models
+          foreach ($promotePath in $smPathsToPromote) {
+              try {
+                  Write-Host "Promoting semantic model at $promotePath to UAT workspace $uatWorkspaceName"
+                  $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+              } catch {
+                  Write-Error "Failed to promote semantic model at $promotePath: $_"
+                  throw
+              }
+          }
+
+          # Import Reports
+          foreach ($promotePath in $rptPathsToPromote) {
+              try {
+                  Write-Host "Promoting report at $promotePath to UAT workspace $uatWorkspaceName"
+                  $rptPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+              } catch {
+                  Write-Error "Failed to promote report at $promotePath: $_"
+                  throw
+              }
+          }
+
+          Write-Host "Promotion of changes to UAT workspace completed successfully."
+
+          # ----------- DQV Testing ----------- #
+          Write-Host "Starting Data Quality Validation (DQV) testing..."
+
+          # Assume you have a DQV script or function to execute
+          # Replace the following with your actual DQV testing commands
+
+          try {
+              # Example DQV Testing Command
+              # Replace with your actual DQV testing logic
+              Invoke-DQVTest -workspaceId $uatWorkspaceID -Verbose -Debug
+              Write-Host "DQV testing completed successfully."
+          } catch {
+              Write-Error "DQV testing failed: $_"
+              throw
+          }
+
+          # ----------- Validate Data Refresh ----------- #
+          Write-Host "Validating data refresh..."
+
+          try {
+              # Example Data Refresh Command
+              # Replace with your actual data refresh logic
+              Invoke-SemanticModelRefresh -workspaceId $uatWorkspaceID -RefreshType Full -Wait -Verbose -Debug
+              Write-Host "Data refresh validated successfully."
+          } catch {
+              Write-Error "Data refresh validation failed: $_"
+              throw
+          }
+
+          Write-Host "All steps completed successfully."
+
+      } catch {
+          Write-Error "An error occurred: $_"
+          throw
+      }
+  env:
+    DEV_WORKSPACE_NAME: ${{ parameters.DEV_WORKSPACE_NAME }}
+    UAT_WORKSPACE_NAME: ${{ parameters.UAT_WORKSPACE_NAME }}
 
