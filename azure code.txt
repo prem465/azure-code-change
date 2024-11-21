@@ -1536,31 +1536,31 @@ jobs:
                 Import-Module MicrosoftPowerBIMgmt -Force
 
                 # ----------- Setup Credentials ----------- #
-                $secret = ${env:CLIENT_SECRET} | ConvertTo-SecureString -AsPlainText -Force
-                $credential = [System.Management.Automation.PSCredential]::new(${env:CLIENT_ID}, $secret)
+                $secret = $${env:CLIENT_SECRET} | ConvertTo-SecureString -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new($${env:CLIENT_ID}, $secret)
 
                 # Clean any potential whitespace from tenant ID
-                $tenantId = ${env:TENANT_ID}.Trim()
+                $tenantId = $${env:TENANT_ID}.Trim()
 
                 # Output partial values for debugging (do not expose sensitive information)
                 if ($tenantId.Length -ge 4) {
-                    Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+                    Write-Host "Using sanitized tenant ID (partial): '$$($tenantId.Substring(0, 4))...'"
                 } else {
                     Write-Host "Tenant ID appears to be empty or too short."
                 }
 
                 if ($credential.UserName.Length -ge 4) {
-                    Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'"
+                    Write-Host "Using client ID (partial): '$$($credential.UserName.Substring(0, 4))...'"
                 } else {
                     Write-Host "Client ID appears to be empty or too short."
                 }
 
                 # Check if service principal or username/password
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-                $isServicePrincipal = $false
+                $isServicePrincipal = $$false
 
                 if ($credential.UserName -match $guidRegex) {
-                  $isServicePrincipal = $true
+                  $isServicePrincipal = $$true
                 }
 
                 # ----------- Login to Azure and Fabric ----------- #
@@ -1577,20 +1577,20 @@ jobs:
                 }
 
                 # Set AzCopy Connection
-                $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-                $oneLakeUri = New-Object System.Uri("${env:ONELAKE_ENDPOINT}")
+                $${env:AZCOPY_SPA_CLIENT_SECRET} = $plainTextPwd
+                $oneLakeUri = New-Object System.Uri("$${env:ONELAKE_ENDPOINT}")
                 $oneLakeDomain = $oneLakeUri.Host
 
                 $loginResult = azcopy login --service-principal `
                   --application-id $credential.UserName `
                   --tenant-id $tenantId `
-                  --trusted-microsoft-suffixes="${oneLakeDomain}" `
+                  --trusted-microsoft-suffixes="$${oneLakeDomain}" `
                   --output-type json | ConvertFrom-Json
 
                 # Check if login was successful
-                $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+                $checkResult = $loginResult | Where-Object { $$_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
 
-                if (!$checkResult) {
+                if (!$$checkResult) {
                   Write-Host "##[error] Failed to login to azcopy"
                   throw "AzCopy login failed."
                 }
@@ -1619,8 +1619,8 @@ jobs:
                 $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
 
                 # Output detected changes for debugging
-                Write-Host "##[debug]Detected Semantic Model Changes: $($pbipDSChanges)"
-                Write-Host "##[debug]Detected Report Changes: $($pbipRPTChanges)"
+                Write-Host "##[debug]Detected Semantic Model Changes: $$($pbipDSChanges)"
+                Write-Host "##[debug]Detected Report Changes: $$($pbipRPTChanges)"
 
                 # Detect if no changes
                 if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
@@ -1629,16 +1629,16 @@ jobs:
                 }
 
                 # Get Dev and UAT workspace IDs
-                $devWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:DEV_WORKSPACE_NAME}"
-                $uatWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:UAT_WORKSPACE_NAME}"
+                $devWorkspaceObj = Get-FabricWorkspace -workspaceName "$${env:DEV_WORKSPACE_NAME}"
+                $uatWorkspaceObj = Get-FabricWorkspace -workspaceName "$${env:UAT_WORKSPACE_NAME}"
 
                 if (-not $devWorkspaceObj) {
-                    Write-Error "Dev workspace '${env:DEV_WORKSPACE_NAME}' not found."
+                    Write-Error "Dev workspace '$${env:DEV_WORKSPACE_NAME}' not found."
                     throw
                 }
 
                 if (-not $uatWorkspaceObj) {
-                    Write-Error "UAT workspace '${env:UAT_WORKSPACE_NAME}' not found."
+                    Write-Error "UAT workspace '$${env:UAT_WORKSPACE_NAME}' not found."
                     throw
                 }
 
@@ -1649,16 +1649,16 @@ jobs:
                 # Prepare paths to promote
                 $smPathsToPromote = @()
                 foreach ($change in $pbipDSChanges) {
-                    $smPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+                    $smPathsToPromote += (Join-Path -Path $${env:BUILD_SOURCESDIRECTORY} -ChildPath $change)
                 }
 
                 # Import Semantic Models
                 foreach ($promotePath in $smPathsToPromote) {
                     try {
-                        Write-Host "Promoting semantic model at $promotePath to UAT workspace ${env:UAT_WORKSPACE_NAME}"
-                        $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+                        Write-Host "Promoting semantic model at $$promotePath to UAT workspace $${env:UAT_WORKSPACE_NAME}"
+                        $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $$promotePath -Verbose -Debug
                     } catch {
-                        Write-Error "Failed to promote semantic model at $promotePath: $_"
+                        Write-Error "Failed to promote semantic model at $$promotePath: $$_"
                         throw
                     }
                 }
@@ -1667,16 +1667,16 @@ jobs:
                 # Prepare paths to promote
                 $rptPathsToPromote = @()
                 foreach ($change in $pbipRPTChanges) {
-                    $rptPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+                    $rptPathsToPromote += (Join-Path -Path $${env:BUILD_SOURCESDIRECTORY} -ChildPath $change)
                 }
 
                 # Import Reports
                 foreach ($promotePath in $rptPathsToPromote) {
                     try {
-                        Write-Host "Promoting report at $promotePath to UAT workspace ${env:UAT_WORKSPACE_NAME}"
-                        $rptPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+                        Write-Host "Promoting report at $$promotePath to UAT workspace $${env:UAT_WORKSPACE_NAME}"
+                        $rptPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $$promotePath -Verbose -Debug
                     } catch {
-                        Write-Error "Failed to promote report at $promotePath: $_"
+                        Write-Error "Failed to promote report at $$promotePath: $$_"
                         throw
                     }
                 }
@@ -1691,7 +1691,7 @@ jobs:
                     Invoke-DQVTesting -WorkspaceId $uatWorkspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
                     Write-Host "DQV testing completed successfully."
                 } catch {
-                    Write-Error "DQV testing failed: $_"
+                    Write-Error "DQV testing failed: $$_"
                     throw
                 }
 
@@ -1703,14 +1703,14 @@ jobs:
                     Invoke-SemanticModelRefresh -WorkspaceId $uatWorkspaceID -RefreshType Full -Wait -Verbose -Debug
                     Write-Host "Data refresh validated successfully."
                 } catch {
-                    Write-Error "Data refresh validation failed: $_"
+                    Write-Error "Data refresh validation failed: $$_"
                     throw
                 }
 
                 Write-Host "All steps completed successfully."
 
             } catch {
-                Write-Error "An error occurred: $_"
+                Write-Error "An error occurred: $$_"
                 throw
             }
         env:
