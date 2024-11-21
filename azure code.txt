@@ -1102,7 +1102,12 @@ steps:
 
 --------------------------------------------------------------------------------------
 
-script: |
+- task: PowerShell@2
+  displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+  inputs:
+    pwsh: true
+    targetType: 'inline'
+    script: |
       try {
           # ----------- Import PowerShell Modules ----------- #
           Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
@@ -1154,4 +1159,19 @@ script: |
           }
 
           Write-Host "Authentication successful."
+
+          # ----------- Connect to Power BI ----------- #
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal `
+              -Credential $credential `
+              -TenantId ${env:TENANT_ID} -ErrorAction Stop -Verbose -Debug
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential `
+              -TenantId ${env:TENANT_ID} -ErrorAction Stop -Verbose -Debug
+          }
+
+          Write-Host "Connected to Power BI successfully."
+
+          # ----------- Process Changes ----------- #
+          Write-Host "Processing changes..."
 
