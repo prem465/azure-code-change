@@ -1452,3 +1452,270 @@ jobs:
           DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
           ONELAKE_ENDPOINT: $(ONELAKE_ENDPOINT)
+------------------------------------------------------------------------------------------------------
+
+one lake system varibale:
+
+parameters:
+  - name: DEV_WORKSPACE_NAME
+    displayName: "Development Workspace Name"
+    type: string
+    default: 'YourDevWorkspaceName'  # Replace with your actual Dev workspace name
+
+  - name: UAT_WORKSPACE_NAME
+    displayName: "UAT Workspace Name"
+    type: string
+    default: 'YourUATWorkspaceName'  # Replace with your actual UAT workspace name
+
+trigger:
+  branches:
+    include:
+      - develop  # Update to the branch you want to trigger on
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: powerbi  # Contains CLIENT_ID, CLIENT_SECRET, TENANT_ID
+  - name: DEV_WORKSPACE_NAME
+    value: '${{ parameters.DEV_WORKSPACE_NAME }}'
+  - name: UAT_WORKSPACE_NAME
+    value: '${{ parameters.UAT_WORKSPACE_NAME }}'
+
+jobs:
+  - job: Job1
+    displayName: "Automated Deployment and Testing Job"
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        displayName: 'Checkout Repository'
+
+      # Step 1: Install Dependencies and Uninstall AzureRM Modules
+      - task: PowerShell@2
+        displayName: 'Install Dependencies and Uninstall AzureRM Modules'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            # ----------- Uninstall AzureRM Modules ----------- #
+            Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
+            Write-Host "AzureRM modules uninstalled."
+
+            # ----------- Install Required PowerShell Modules ----------- #
+            if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
+              Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
+            }
+            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
+            Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
+            Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
+
+            # Create a custom modules directory
+            if (-not (Test-Path -Path ".\.nuget\custom_modules")) {
+              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
+            }
+
+            # Download FabricPS-PBIP module files
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
+            }
+
+      # Step 2: Deploy Changes, Conduct Testing, and Validate Data Refresh
+      - task: PowerShell@2
+        displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                # ----------- Import PowerShell Modules ----------- #
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+                Import-Module Az.Accounts -Force
+                Import-Module MicrosoftPowerBIMgmt -Force
+
+                # ----------- Setup Credentials ----------- #
+                $secret = ${env:CLIENT_SECRET} | ConvertTo-SecureString -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new(${env:CLIENT_ID}, $secret)
+
+                # Clean any potential whitespace from tenant ID
+                $tenantId = ${env:TENANT_ID}.Trim()
+
+                # Output partial values for debugging (do not expose sensitive information)
+                if ($tenantId.Length -ge 4) {
+                    Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+                } else {
+                    Write-Host "Tenant ID appears to be empty or too short."
+                }
+
+                if ($credential.UserName.Length -ge 4) {
+                    Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'"
+                } else {
+                    Write-Host "Client ID appears to be empty or too short."
+                }
+
+                # Check if service principal or username/password
+                $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+                $isServicePrincipal = $false
+
+                if ($credential.UserName -match $guidRegex) {
+                  $isServicePrincipal = $true
+                }
+
+                # ----------- Login to Azure and Fabric ----------- #
+                $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
+                # Set Fabric Connection
+                if ($isServicePrincipal) {
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                    -servicePrincipalSecret $plainTextPwd `
+                    -tenantId $tenantId -reset
+                } else {
+                  Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+                }
+
+                # Set AzCopy Connection
+                $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+                $oneLakeUri = New-Object System.Uri("${env:ONELAKE_ENDPOINT}")
+                $oneLakeDomain = $oneLakeUri.Host
+
+                $loginResult = azcopy login --service-principal `
+                  --application-id $credential.UserName `
+                  --tenant-id $tenantId `
+                  --trusted-microsoft-suffixes="${oneLakeDomain}" `
+                  --output-type json | ConvertFrom-Json
+
+                # Check if login was successful
+                $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+
+                if (!$checkResult) {
+                  Write-Host "##[error] Failed to login to azcopy"
+                  throw "AzCopy login failed."
+                }
+
+                Write-Host "Authentication successful."
+
+                # ----------- Connect to Power BI ----------- #
+                if ($isServicePrincipal) {
+                  Connect-PowerBIServiceAccount -ServicePrincipal `
+                    -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+                } else {
+                  Connect-PowerBIServiceAccount -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+                }
+
+                Write-Host "Connected to Power BI successfully."
+
+                # ----------- Process Changes ----------- #
+                Write-Host "Processing changes..."
+
+                # Identify changes for promotion
+                $pbipDSChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+                $pbipRPTChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+                $pbipDSChanges = $pbipDSChanges | Sort-Object -Unique
+                $pbipRPTChanges = $pbipRPTChanges | Sort-Object -Unique
+
+                # Output detected changes for debugging
+                Write-Host "##[debug]Detected Semantic Model Changes: $($pbipDSChanges)"
+                Write-Host "##[debug]Detected Report Changes: $($pbipRPTChanges)"
+
+                # Detect if no changes
+                if ($pbipDSChanges.Count -eq 0 -and $pbipRPTChanges.Count -eq 0) {
+                    Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+                    exit 0
+                }
+
+                # Get Dev and UAT workspace IDs
+                $devWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:DEV_WORKSPACE_NAME}"
+                $uatWorkspaceObj = Get-FabricWorkspace -workspaceName "${env:UAT_WORKSPACE_NAME}"
+
+                if (-not $devWorkspaceObj) {
+                    Write-Error "Dev workspace '${env:DEV_WORKSPACE_NAME}' not found."
+                    throw
+                }
+
+                if (-not $uatWorkspaceObj) {
+                    Write-Error "UAT workspace '${env:UAT_WORKSPACE_NAME}' not found."
+                    throw
+                }
+
+                $devWorkspaceID = $devWorkspaceObj.Id
+                $uatWorkspaceID = $uatWorkspaceObj.Id
+
+                # ----------- Promote Semantic Models to UAT Workspace ----------- #
+                # Prepare paths to promote
+                $smPathsToPromote = @()
+                foreach ($change in $pbipDSChanges) {
+                    $smPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+                }
+
+                # Import Semantic Models
+                foreach ($promotePath in $smPathsToPromote) {
+                    try {
+                        Write-Host "Promoting semantic model at $promotePath to UAT workspace ${env:UAT_WORKSPACE_NAME}"
+                        $smPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+                    } catch {
+                        Write-Error "Failed to promote semantic model at $promotePath: $_"
+                        throw
+                    }
+                }
+
+                # ----------- Promote Reports to UAT Workspace ----------- #
+                # Prepare paths to promote
+                $rptPathsToPromote = @()
+                foreach ($change in $pbipRPTChanges) {
+                    $rptPathsToPromote += (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
+                }
+
+                # Import Reports
+                foreach ($promotePath in $rptPathsToPromote) {
+                    try {
+                        Write-Host "Promoting report at $promotePath to UAT workspace ${env:UAT_WORKSPACE_NAME}"
+                        $rptPromotedItem = Import-FabricItem -workspaceId $uatWorkspaceID -path $promotePath -Verbose -Debug
+                    } catch {
+                        Write-Error "Failed to promote report at $promotePath: $_"
+                        throw
+                    }
+                }
+
+                Write-Host "Promotion of changes to UAT workspace completed successfully."
+
+                # ----------- DQV Testing ----------- #
+                Write-Host "Starting Data Quality Validation (DQV) testing..."
+
+                try {
+                    # Replace with your actual DQV testing logic
+                    Invoke-DQVTesting -WorkspaceId $uatWorkspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
+                    Write-Host "DQV testing completed successfully."
+                } catch {
+                    Write-Error "DQV testing failed: $_"
+                    throw
+                }
+
+                # ----------- Validate Data Refresh ----------- #
+                Write-Host "Validating data refresh..."
+
+                try {
+                    # Replace with your actual data refresh validation logic
+                    Invoke-SemanticModelRefresh -WorkspaceId $uatWorkspaceID -RefreshType Full -Wait -Verbose -Debug
+                    Write-Host "Data refresh validated successfully."
+                } catch {
+                    Write-Error "Data refresh validation failed: $_"
+                    throw
+                }
+
+                Write-Host "All steps completed successfully."
+
+            } catch {
+                Write-Error "An error occurred: $_"
+                throw
+            }
+        env:
+          CLIENT_SECRET: $(CLIENT_SECRET)
+          CLIENT_ID: $(CLIENT_ID)
+          TENANT_ID: $(TENANT_ID)
+          DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
