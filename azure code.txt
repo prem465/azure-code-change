@@ -1103,31 +1103,55 @@ steps:
 --------------------------------------------------------------------------------------
 
 script: |
-            # ----------- Check if PowerShell Modules are Installed ----------- #
-            # Install Az.Accounts if Needed
-            if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
-              Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
-            }
+      try {
+          # ----------- Import PowerShell Modules ----------- #
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
 
-            Write-Host "##[debug] ----------- Install MicrosoftPowerBIMgmt -----------"
-            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
+          # ----------- Setup Credentials ----------- #
+          $secret = ${env:CLIENT_SECRET} | ConvertTo-SecureString -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new(${env:CLIENT_ID}, $secret)
 
-            # Install Invoke-DQVTesting
-            Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
+          # Check if service principal or username/password
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
 
-            # Install Invoke-SemanticModelRefresh
-            Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
+          if ($credential.UserName -match $guidRegex) {
+            $isServicePrincipal = $true
+          }
 
-            # Create a new directory in the current location
-            if ((Test-Path -path ".\.nuget\custom_modules") -eq $false) {
-              New-Item -Name ".nuget\custom_modules" -Type Directory
-            }
+          # ----------- Login to Azure and Fabric ----------- #
+          $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
 
-            # For each url download and install in module folder
-            @(
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-            ) | ForEach-Object {
-              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
-            }
+          # Set Fabric Connection
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+              -servicePrincipalSecret $plainTextPwd `
+              -tenantId ${env:TENANT_ID} -reset
+          } else {
+            Set-FabricAuthToken -credential $credential -tenantId ${env:TENANT_ID} -reset
+          }
+
+          # Set AzCopy Connection
+          $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+          $oneLakeUri = New-Object System.Uri("${env:ONELAKE_ENDPOINT}")
+          $oneLakeDomain = $oneLakeUri.Host
+
+          $loginResult = azcopy login --service-principal `
+            --application-id $credential.UserName `
+            --tenant-id "${env:TENANT_ID}" `
+            --trusted-microsoft-suffixes="${oneLakeDomain}" `
+            --output-type json | ConvertFrom-Json
+
+          # Check if login was successful
+          $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+
+          if (!$checkResult) {
+            Write-Host "##[error] Failed to login to azcopy"
+            throw "AzCopy login failed."
+          }
+
+          Write-Host "Authentication successful."
 
