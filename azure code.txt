@@ -2418,13 +2418,11 @@ jobs:
             }
 
             # Download FabricPS-PBIP module files
-            $moduleUrls = @(
-              "https://raw.githubusercontent.com/microsoft/FabricAnalyticsApps/main/powershell/FabricPS-PBIP.psd1",
-              "https://raw.githubusercontent.com/microsoft/FabricAnalyticsApps/main/powershell/FabricPS-PBIP.psm1"
-            )
-
-            foreach ($url in $moduleUrls) {
-              Invoke-WebRequest -Uri $url -OutFile ".\.nuget\custom_modules\$(Split-Path $url -Leaf)"
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
             }
 
       # Step 2: Deploy Changes, Conduct Testing, and Validate Data Refresh
