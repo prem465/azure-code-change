@@ -2652,6 +2652,10 @@ steps:
         $pbirFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.Repo/StaticResources"
         $pbismFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.SemanticModel"
 
+        # Log the resolved paths
+        Write-Host "Checking .pbir files in folder: $pbirFolder"
+        Write-Host "Checking .pbism files in folder: $pbismFolder"
+
         # Validate .pbir files in StaticResources
         if ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
             Write-Error "No .pbir files found in the StaticResources folder."
@@ -2665,6 +2669,7 @@ steps:
         } else {
             Write-Host ".pbism file(s) found in the SemanticModel folder."
         }
+
 
 
 
