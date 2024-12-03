@@ -2641,7 +2641,6 @@ pool:
   vmImage: 'windows-latest'
 
 steps:
-  # Step 1: Validate Power BI Files
   - task: PowerShell@2
     displayName: "Validate Power BI Files"
     inputs:
@@ -2649,23 +2648,22 @@ steps:
       script: |
         Write-Host "Starting validation of Power BI files..."
 
-        # Define directories to check
-        $pbirFolder = "$(System.DefaultWorkingDirectory)/static resources"
-        $pbismFolder = "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel"
+        # Define corrected directories to check
+        $pbirFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.Repo/StaticResources"
+        $pbismFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.SemanticModel"
 
-        # Validate .pbir files
+        # Validate .pbir files in StaticResources
         if ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
-            Write-Error "No .pbir files found in the static resources folder."
+            Write-Error "No .pbir files found in the StaticResources folder."
         } else {
-            Write-Host ".pbir file(s) found in the static resources folder."
+            Write-Host ".pbir file(s) found in the StaticResources folder."
         }
 
-        # Validate .pbism files
+        # Validate .pbism files in SemanticModel
         if ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
             Write-Error "No .pbism files found in the SemanticModel folder."
-        } else {
-            Write-Host ".pbism file(s) found in the SemanticModel folder."
-        }
+        } else
+
 
   # Step 2: Publish Build Artifacts
   - task: PublishBuildArtifacts@1
