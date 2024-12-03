@@ -2635,76 +2635,41 @@ jobs:
 test anna
 __________________________________________________________________
 trigger:
-  - main  # Adjust the branch as needed
+  - main  # Adjust branch as needed
 
 pool:
   vmImage: 'windows-latest'
 
 steps:
-  # Step 1: Check for Changes in Files
+  # Step 1: Detect Changes in .pbism and .pbir Files
   - task: PowerShell@2
-    displayName: "Check for Changes in Power BI Files"
+    displayName: "Detect Changes in Power BI Files"
     inputs:
       targetType: 'inline'
       script: |
-        Write-Host "Starting change detection for Power BI files..."
+        Write-Host "Detecting changes in Power BI files..."
 
         # Detect changes for .pbism and .pbir files
         $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
         $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
-        $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
-        $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
 
-        # Debugging output for detected changes
-        Write-Host "##[debug]Detected Semantic Model Changes: $($pbipSMChanges)"
-        Write-Host "##[debug]Detected Report Changes: $($pbipRptChanges)"
+        # Output detected changes for debugging
+        Write-Host "Detected Semantic Model Changes: $($pbipSMChanges)"
+        Write-Host "Detected Report Changes: $($pbipRptChanges)"
 
-        # Detect if there are no changes
+        # Exit if no changes detected
         if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
             Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
             exit 0
         }
 
-  # Step 2: Validate Files if Changes are Detected
-  - task: PowerShell@2
-    displayName: "Validate Power BI Files"
-    inputs:
-      targetType: 'inline'
-      script: |
-        Write-Host "Starting validation of Power BI files..."
-
-        # Correct paths for validation
-        $pbirFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.Repo/StaticResources"
-        $pbismFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.SemanticModel"
-
-        # Debug: Print resolved paths
-        Write-Host "Resolved .pbir folder path: $pbirFolder"
-        Write-Host "Resolved .pbism folder path: $pbismFolder"
-
-        # Validate .pbir files in StaticResources
-        if ((Test-Path $pbirFolder) -eq $false) {
-            Write-Error "The folder $pbirFolder does not exist. Please verify the path."
-        } elseif ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
-            Write-Error "No .pbir files found in the StaticResources folder."
-        } else {
-            Write-Host ".pbir file(s) found in the StaticResources folder."
-        }
-
-        # Validate .pbism files in SemanticModel
-        if ((Test-Path $pbismFolder) -eq $false) {
-            Write-Error "The folder $pbismFolder does not exist. Please verify the path."
-        } elseif ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
-            Write-Error "No .pbism files found in the SemanticModel folder."
-        } else {
-            Write-Host ".pbism file(s) found in the SemanticModel folder."
-        }
-
-  # Step 3: Publish Build Artifacts
+  # Step 2: Publish Build Artifacts (if changes are detected)
   - task: PublishBuildArtifacts@1
     displayName: "Publish Build Artifacts"
     inputs:
       pathToPublish: '$(System.DefaultWorkingDirectory)'
       artifactName: 'PowerBIArtifacts'
+
 
 
 
