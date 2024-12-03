@@ -2648,28 +2648,25 @@ steps:
       targetType: 'inline'
       script: |
         Write-Host "Starting validation of Power BI files..."
+        
+        # Define the directories to check
+        $pbirFolder = "$(System.DefaultWorkingDirectory)/static resources"
+        $pbismFolder = "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel"
 
-        # Paths to validate
-        $pbirPath = "$(System.DefaultWorkingDirectory)/static resources/definition.pbir"
-        $pbismPath = "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel/definition.pbism"
-        
-        # Logging paths for debugging
-        Write-Host "Checking path: $pbirPath"
-        Write-Host "Checking path: $pbismPath"
-        
-        # Validate .pbir file
-        if (-Not (Test-Path $pbirPath)) {
-            Write-Error "Definition.pbir file is missing in static resources folder."
+        # Check for .pbir files in the static resources folder
+        if (-Not (Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File)) {
+            Write-Error "No .pbir file found in static resources folder."
         } else {
-            Write-Host "Definition.pbir found."
+            Write-Host "A .pbir file was found in the static resources folder."
         }
-        
-        # Validate .pbism file
-        if (-Not (Test-Path $pbismPath)) {
-            Write-Error "Definition.pbism file is missing in SemanticModel folder."
+
+        # Check for .pbism files in the SemanticModel folder
+        if (-Not (Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File)) {
+            Write-Error "No .pbism file found in SemanticModel folder."
         } else {
-            Write-Host "Definition.pbism found."
+            Write-Host "A .pbism file was found in the SemanticModel folder."
         }
+
 
   # Step 2: Publish Build Artifacts
   - task: PublishBuildArtifacts@1
