@@ -2648,27 +2648,32 @@ steps:
       script: |
         Write-Host "Starting validation of Power BI files..."
 
-        # Define corrected directories to check
+        # Correct paths using System.DefaultWorkingDirectory
         $pbirFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.Repo/StaticResources"
         $pbismFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.SemanticModel"
 
-        # Log the resolved paths
-        Write-Host "Checking .pbir files in folder: $pbirFolder"
-        Write-Host "Checking .pbism files in folder: $pbismFolder"
+        # Debug: Print resolved paths
+        Write-Host "Resolved .pbir folder path: $pbirFolder"
+        Write-Host "Resolved .pbism folder path: $pbismFolder"
 
         # Validate .pbir files in StaticResources
-        if ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
+        if ((Test-Path $pbirFolder) -eq $false) {
+            Write-Error "The folder $pbirFolder does not exist. Please verify the path."
+        } elseif ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
             Write-Error "No .pbir files found in the StaticResources folder."
         } else {
             Write-Host ".pbir file(s) found in the StaticResources folder."
         }
 
         # Validate .pbism files in SemanticModel
-        if ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
+        if ((Test-Path $pbismFolder) -eq $false) {
+            Write-Error "The folder $pbismFolder does not exist. Please verify the path."
+        } elseif ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
             Write-Error "No .pbism files found in the SemanticModel folder."
         } else {
             Write-Host ".pbism file(s) found in the SemanticModel folder."
         }
+
 
 
 
