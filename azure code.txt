@@ -2662,7 +2662,10 @@ steps:
         # Validate .pbism files in SemanticModel
         if ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
             Write-Error "No .pbism files found in the SemanticModel folder."
-        } else
+        } else {
+            Write-Host ".pbism file(s) found in the SemanticModel folder."
+        }
+
 
 
   # Step 2: Publish Build Artifacts
