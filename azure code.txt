@@ -2647,16 +2647,29 @@ steps:
     inputs:
       targetType: 'inline'
       script: |
-        Write-Host "Validating Power BI resources..."
-        if (-Not (Test-Path "$(System.DefaultWorkingDirectory)/static resources/definition.pbir")) {
+        Write-Host "Starting validation of Power BI files..."
+
+        # Paths to validate
+        $pbirPath = "$(System.DefaultWorkingDirectory)/static resources/definition.pbir"
+        $pbismPath = "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel/definition.pbism"
+        
+        # Logging paths for debugging
+        Write-Host "Checking path: $pbirPath"
+        Write-Host "Checking path: $pbismPath"
+        
+        # Validate .pbir file
+        if (-Not (Test-Path $pbirPath)) {
             Write-Error "Definition.pbir file is missing in static resources folder."
         } else {
             Write-Host "Definition.pbir found."
         }
-        if (-Not (Test-Path "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel/definition.pbism")) {
+        
+        # Validate .pbism file
+        if (-Not (Test-Path $pbismPath)) {
             Write-Error "Definition.pbism file is missing in SemanticModel folder."
         } else {
             Write-Host "Definition.pbism found."
+        }
 
   # Step 2: Publish Build Artifacts
   - task: PublishBuildArtifacts@1
@@ -2664,6 +2677,7 @@ steps:
     inputs:
       pathToPublish: '$(System.DefaultWorkingDirectory)'
       artifactName: 'CustodialLoadArtifacts'
+
 ---------------------------------------------------------------------------
 stages:
   - stage: Deploy
