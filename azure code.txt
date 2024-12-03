@@ -2635,45 +2635,45 @@ jobs:
 test anna
 __________________________________________________________________
 trigger:
-  - main  # Adjust branch as required
+  - main  # Adjust the branch as needed
 
 pool:
   vmImage: 'windows-latest'
 
 steps:
-  # Step 1: Validate Files
+  # Step 1: Validate Power BI Files
   - task: PowerShell@2
     displayName: "Validate Power BI Files"
     inputs:
       targetType: 'inline'
       script: |
         Write-Host "Starting validation of Power BI files..."
-        
-        # Define the directories to check
+
+        # Define directories to check
         $pbirFolder = "$(System.DefaultWorkingDirectory)/static resources"
         $pbismFolder = "$(System.DefaultWorkingDirectory)/custodial loads monitor.SemanticModel"
 
-        # Check for .pbir files in the static resources folder
-        if (-Not (Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File)) {
-            Write-Error "No .pbir file found in static resources folder."
+        # Validate .pbir files
+        if ((Get-ChildItem -Path $pbirFolder -Filter "*.pbir" -File | Measure-Object).Count -eq 0) {
+            Write-Error "No .pbir files found in the static resources folder."
         } else {
-            Write-Host "A .pbir file was found in the static resources folder."
+            Write-Host ".pbir file(s) found in the static resources folder."
         }
 
-        # Check for .pbism files in the SemanticModel folder
-        if (-Not (Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File)) {
-            Write-Error "No .pbism file found in SemanticModel folder."
+        # Validate .pbism files
+        if ((Get-ChildItem -Path $pbismFolder -Filter "*.pbism" -File | Measure-Object).Count -eq 0) {
+            Write-Error "No .pbism files found in the SemanticModel folder."
         } else {
-            Write-Host "A .pbism file was found in the SemanticModel folder."
+            Write-Host ".pbism file(s) found in the SemanticModel folder."
         }
-
 
   # Step 2: Publish Build Artifacts
   - task: PublishBuildArtifacts@1
     displayName: "Publish Build Artifacts"
     inputs:
       pathToPublish: '$(System.DefaultWorkingDirectory)'
-      artifactName: 'CustodialLoadArtifacts'
+      artifactName: 'PowerBIArtifacts'
+
 
 ---------------------------------------------------------------------------
 stages:
