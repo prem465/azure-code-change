@@ -2641,6 +2641,31 @@ pool:
   vmImage: 'windows-latest'
 
 steps:
+  # Step 1: Check for Changes in Files
+  - task: PowerShell@2
+    displayName: "Check for Changes in Power BI Files"
+    inputs:
+      targetType: 'inline'
+      script: |
+        Write-Host "Starting change detection for Power BI files..."
+
+        # Detect changes for .pbism and .pbir files
+        $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+        $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+        $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
+        $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
+
+        # Debugging output for detected changes
+        Write-Host "##[debug]Detected Semantic Model Changes: $($pbipSMChanges)"
+        Write-Host "##[debug]Detected Report Changes: $($pbipRptChanges)"
+
+        # Detect if there are no changes
+        if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
+            Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+            exit 0
+        }
+
+  # Step 2: Validate Files if Changes are Detected
   - task: PowerShell@2
     displayName: "Validate Power BI Files"
     inputs:
@@ -2648,7 +2673,7 @@ steps:
       script: |
         Write-Host "Starting validation of Power BI files..."
 
-        # Correct paths using System.DefaultWorkingDirectory
+        # Correct paths for validation
         $pbirFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.Repo/StaticResources"
         $pbismFolder = "$(System.DefaultWorkingDirectory)/Custodial Loads Monitor.SemanticModel"
 
@@ -2674,16 +2699,13 @@ steps:
             Write-Host ".pbism file(s) found in the SemanticModel folder."
         }
 
-
-
-
-
-  # Step 2: Publish Build Artifacts
+  # Step 3: Publish Build Artifacts
   - task: PublishBuildArtifacts@1
     displayName: "Publish Build Artifacts"
     inputs:
       pathToPublish: '$(System.DefaultWorkingDirectory)'
       artifactName: 'PowerBIArtifacts'
+
 
 
 ---------------------------------------------------------------------------
