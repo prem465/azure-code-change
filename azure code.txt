@@ -2685,7 +2685,6 @@ trigger: none  # Trigger manually or by the CI pipeline artifact
 
 variables:
 - group: powerbi  # Variable group name for credentials
-  # Ensure this variable group includes Clientsecret, clinetid, tenantid
 workspace_id_uat: a4628c7b-adda-4285-8c1f-758b19162d0b  # UAT Workspace ID
 
 stages:
@@ -2700,7 +2699,7 @@ stages:
 
     # Step 1: Install Power BI Module
     - task: PowerShell@2
-      displayName: Install Power BI Module
+      displayName: Install and Import Power BI Module
       inputs:
         targetType: 'inline'
         script: |
@@ -2711,6 +2710,11 @@ stages:
           } else {
               Write-Host "MicrosoftPowerBIMgmt module is already installed."
           }
+
+          # Import the module into the session
+          Write-Host "Importing MicrosoftPowerBIMgmt module..."
+          Import-Module -Name MicrosoftPowerBIMgmt
+          Write-Host "Power BI module imported successfully."
 
     # Step 2: Download Artifacts from CI Pipeline
     - task: DownloadPipelineArtifact@2
@@ -2757,6 +2761,7 @@ stages:
           }
 
           Write-Host "Deployment completed successfully for UAT."
+
 
 
 
