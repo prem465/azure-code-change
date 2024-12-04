@@ -2681,52 +2681,86 @@ steps:
 
 
 ---------------------------------------------------------------------------
+trigger: none  # Trigger manually or by the CI pipeline artifact
+
+parameters:
+  - name: environment
+    displayName: 'Deployment Environment'
+    type: string
+    default: 'uat'  # Default environment is UAT
+    values:
+      - dev
+      - uat
+
+variables:
+  # Workspace IDs for different environments
+  workspace_id_dev: 'c017440f-4a5b-46bd-a2c0-93ee3f04ab4d'  # Development Workspace ID
+  workspace_id_uat: 'a4628c7b-adda-4285-8c1f-758b19162d0b'  # UAT Workspace ID
+
 stages:
-  - stage: Deploy
-    displayName: "Continuous Deployment"
-    variables:
-      workspace_id_dev: "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d"  # Development Workspace ID
-      workspace_id_uat: "a4628c7b-adda-4285-8c1f-758b19162d0b"  # UAT Workspace ID
-    jobs:
-      - job: DeployReports
-        displayName: "Deploy Reports to Power BI Workspace"
-        pool:
-          vmImage: 'windows-latest'
-        steps:
-          # Step 1: Install Power BI Module
-          - task: PowerShell@2
-            displayName: "Install Power BI Module"
-            inputs:
-              targetType: 'inline'
-              script: |
-                Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber
+- stage: Deploy
+  displayName: 'Continuous Deployment'
+  jobs:
+  - job: DeployReports
+    displayName: 'Deploy Reports to Power BI Workspace'
+    pool:
+      vmImage: 'windows-latest'
 
-          # Step 2: Connect to Power BI Service Account
-          - task: PowerShell@2
-            displayName: "Connect to Power BI Service Account"
-            inputs:
-              targetType: 'inline'
-              script: |
-                $credential = New-Object System.Management.Automation.PSCredential ($env:clinetid, (ConvertTo-SecureString $env:Clientsecret -AsPlainText -Force))
-                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:tenantid
+    steps:
+    # Step 1: Install Power BI Module
+    - task: PowerShell@2
+      displayName: 'Install Power BI Module'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser
 
-          # Step 3: Deploy Reports
-          - task: PowerShell@2
-            displayName: "Deploy Reports"
-            inputs:
-              targetType: 'inline'
-              script: |
-                # Select the environment (e.g., dev or uat)
-                $workspaceId = $env:workspace_id_dev  # Change this to workspace_id_uat for UAT
-                $reportPath = "$(Pipeline.Workspace)/static resources/definition.pbir"
-                Import-PowerBIReport -Path $reportPath -WorkspaceId $workspaceId
+    # Step 2: Download Artifacts from CI Pipeline
+    - task: DownloadPipelineArtifact@2
+      displayName: 'Download Artifacts from CI Pipeline'
+      inputs:
+        buildType: 'specific'
+        project: '$(System.TeamProjectId)'  # Automatically detects the project
+        pipeline: '146'  # CI pipeline ID
+        runVersion: 'latest'
+        artifact: 'PowerBIArtifacts'
+        path: '$(Pipeline.Workspace)'
 
-          # Step 4: Refresh Datasets
-          - task: PowerShell@2
-            displayName: "Refresh Power BI Dataset"
-            inputs:
-              targetType: 'inline'
-              script: |
-                # Select the environment (e.g., dev or uat)
-                $datasetId = "YOUR_DATASET_ID"  # Replace this with the actual dataset ID
-                Invoke-PowerBIRestMethod -Url "datasets/$datasetId/refreshes" -Method POST
+    # Step 3: Deploy Power BI Reports and Models
+    - task: PowerShell@2
+      displayName: 'Deploy Power BI Reports and Models'
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting deployment of Power BI files..."
+
+          # Determine Workspace ID based on the environment
+          $workspaceId = if ("$(environment)" -eq "dev") { "$(workspace_id_dev)" } else { "$(workspace_id_uat)" }
+
+          Write-Host "Deploying to workspace ID: $workspaceId"
+
+          # Authenticate to Power BI Service using Service Principal
+          $credential = New-Object System.Management.Automation.PSCredential(
+            "$(clinetid)", 
+            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
+          )
+
+          Write-Host "Authenticating with Power BI Service..."
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "$(tenantid)"
+
+          # Deploy .pbir files (Power BI Reports)
+          Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbir" -Recurse | ForEach-Object {
+              Write-Host "Deploying report: $($_.FullName)"
+              Import-PowerBIReport -Path $_.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite
+          }
+
+          # Deploy .pbism files (Power BI Semantic Models)
+          Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbism" -Recurse | ForEach-Object {
+              Write-Host "Deploying semantic model: $($_.FullName)"
+              # Add deployment logic for semantic models here if needed
+          }
+
+    # Step 4: Post-Deployment Success Logs
+    - script: |
+        Write-Host "Deployment completed successfully for workspace ID: $(workspace_id_uat)"
+      displayName: 'Log Deployment Success'
