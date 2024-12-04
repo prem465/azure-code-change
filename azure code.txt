@@ -2641,7 +2641,13 @@ pool:
   vmImage: 'windows-latest'
 
 steps:
-  # Step 1: Detect Changes in .pbism and .pbir Files
+  # Step 1: Checkout Repository with Full History
+  - task: Checkout@1
+    displayName: "Checkout Repository"
+    inputs:
+      fetchDepth: 0  # Fetch full commit history
+
+  # Step 2: Detect Changes in .pbism and .pbir Files
   - task: PowerShell@2
     displayName: "Detect Changes in Power BI Files"
     inputs:
@@ -2663,12 +2669,13 @@ steps:
             exit 0
         }
 
-  # Step 2: Publish Build Artifacts (if changes are detected)
+  # Step 3: Publish Build Artifacts (if changes are detected)
   - task: PublishBuildArtifacts@1
     displayName: "Publish Build Artifacts"
     inputs:
       pathToPublish: '$(System.DefaultWorkingDirectory)'
       artifactName: 'PowerBIArtifacts'
+
 
 
 
