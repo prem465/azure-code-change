@@ -2713,7 +2713,19 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser
+          Write-Host "Checking if the MicrosoftPowerBIMgmt module is already installed..."
+          if (-not (Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt)) {
+              Write-Host "MicrosoftPowerBIMgmt module not found. Installing now..."
+              try {
+                  Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
+                  Write-Host "MicrosoftPowerBIMgmt module installed successfully."
+              } catch {
+                  Write-Error "Failed to install MicrosoftPowerBIMgmt module. Error: $_"
+                  exit 1
+              }
+          } else {
+              Write-Host "MicrosoftPowerBIMgmt module is already installed. Skipping installation."
+          }
 
     # Step 2: Download Artifacts from CI Pipeline
     - task: DownloadPipelineArtifact@2
