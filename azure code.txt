@@ -2683,64 +2683,37 @@ steps:
 ---------------------------------------------------------------------------
 trigger: none  # Trigger manually or by the CI pipeline artifact
 
-parameters:
-  - name: environment
-    displayName: 'Deployment Environment'
-    type: string
-    default: 'uat'  # Default environment is UAT
-    values:
-      - dev
-      - uat
-
 variables:
-  # Workspace IDs for different environments
-  workspace_id_dev: 'c017440f-4a5b-46bd-a2c0-93ee3f04ab4d'  # Development Workspace ID
-  workspace_id_uat: 'a4628c7b-adda-4285-8c1f-758b19162d0b'  # UAT Workspace ID
+- group: powerbi  # Link the variable group to use variables (clinetid, Clientsecret, tenantid)
+
+# Define UAT workspace ID
+workspace_id_uat: a4628c7b-adda-4285-8c1f-758b19162d0b
 
 stages:
 - stage: Deploy
-  displayName: 'Continuous Deployment'
+  displayName: Continuous Deployment
   jobs:
   - job: DeployReports
-    displayName: 'Deploy Reports to Power BI Workspace'
+    displayName: Deploy Reports to Power BI workspace
     pool:
-      vmImage: 'windows-latest'
-
+      vmImage: windows-latest
     steps:
     # Step 1: Install Power BI Module
     - task: PowerShell@2
-      displayName: 'Install Power BI Module'
+      displayName: Install Power BI Module
       inputs:
         targetType: 'inline'
         script: |
           Write-Host "Checking if the MicrosoftPowerBIMgmt module is already installed..."
           if (-not (Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt)) {
               Write-Host "MicrosoftPowerBIMgmt module not found. Installing now..."
-              try {
-                  Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
-                  Write-Host "MicrosoftPowerBIMgmt module installed successfully."
-              } catch {
-                  Write-Error "Failed to install MicrosoftPowerBIMgmt module. Error: $_"
-                  exit 1
-              }
+              Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
           } else {
-              Write-Host "MicrosoftPowerBIMgmt module is already installed. Skipping installation."
+              Write-Host "MicrosoftPowerBIMgmt module is already installed."
           }
 
-    # Step 2: Download Artifacts from CI Pipeline
-    - task: DownloadPipelineArtifact@2
-      displayName: 'Download Artifacts from CI Pipeline'
-      inputs:
-        buildType: 'specific'
-        project: '$(System.TeamProjectId)'  # Automatically detects the project
-        pipeline: '146'  # CI pipeline ID
-        runVersion: 'latest'
-        artifact: 'PowerBIArtifacts'
-        path: '$(Pipeline.Workspace)'
-
-    # Step 3: Deploy Power BI Reports and Models
-                   
-          - task: PowerShell@2
+    # Step 2: Deploy Power BI Reports and Models
+    - task: PowerShell@2
       displayName: 'Deploy Power BI Reports and Models'
       inputs:
         targetType: 'inline'
@@ -2753,7 +2726,7 @@ stages:
 
           # Authenticate to Power BI Service using Service Principal
           $credential = New-Object System.Management.Automation.PSCredential(
-            "$(clinetid)",  # Correct spelling
+            "$(clinetid)", 
             (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
           )
 
@@ -2772,6 +2745,7 @@ stages:
           }
 
           Write-Host "Deployment to UAT completed successfully."
+
 
 
 
