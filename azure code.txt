@@ -2739,17 +2739,18 @@ stages:
         path: '$(Pipeline.Workspace)'
 
     # Step 3: Deploy Power BI Reports and Models
-            - task: PowerShell@2
+                - task: PowerShell@2
       displayName: 'Deploy Power BI Reports and Models'
       inputs:
         targetType: 'inline'
         script: |
-          # Define and log the environment
-          $env = "$(environment)"
-          Write-Host "Environment provided: $env"
+          Write-Host "Starting deployment of Power BI files..."
 
-          # Map environment to Workspace ID
-          $workspaceId = if ($env -eq "dev") { "$(workspace_id_dev)" } else { "$(workspace_id_uat)" }
+          # Use environment variable $env:environment
+          Write-Host "Environment provided: $env:environment"
+
+          # Determine Workspace ID based on environment
+          $workspaceId = if ($env:environment -eq "dev") { "$(workspace_id_dev)" } else { "$(workspace_id_uat)" }
           Write-Host "Workspace ID resolved to: $workspaceId"
 
           # Authenticate to Power BI Service using Service Principal
@@ -2773,7 +2774,7 @@ stages:
               # Add deployment logic for semantic models here if needed
           }
 
-          Write-Host "Deployment completed successfully for environment: $env"
+          Write-Host "Deployment completed successfully for environment: $env:environment"
 
 
 
