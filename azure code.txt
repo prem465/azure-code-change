@@ -2684,20 +2684,20 @@ steps:
 trigger: none  # Trigger manually or by the CI pipeline artifact
 
 variables:
-- group: powerbi  # Link the variable group to use variables (clinetid, Clientsecret, tenantid)
-
-# Define UAT workspace ID
-workspace_id_uat: a4628c7b-adda-4285-8c1f-758b19162d0b
+- group: powerbi  # Variable group name for credentials
+  # Ensure this variable group includes Clientsecret, clinetid, tenantid
+workspace_id_uat: a4628c7b-adda-4285-8c1f-758b19162d0b  # UAT Workspace ID
 
 stages:
 - stage: Deploy
   displayName: Continuous Deployment
   jobs:
   - job: DeployReports
-    displayName: Deploy Reports to Power BI workspace
+    displayName: Deploy Reports to Power BI Workspace
     pool:
-      vmImage: windows-latest
+      vmImage: 'windows-latest'
     steps:
+
     # Step 1: Install Power BI Module
     - task: PowerShell@2
       displayName: Install Power BI Module
@@ -2712,22 +2712,33 @@ stages:
               Write-Host "MicrosoftPowerBIMgmt module is already installed."
           }
 
-    # Step 2: Deploy Power BI Reports and Models
+    # Step 2: Download Artifacts from CI Pipeline
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Artifacts from CI Pipeline
+      inputs:
+        buildType: 'specific'
+        project: '$(System.TeamProjectId)'  # Current project
+        pipeline: '<CI_PIPELINE_ID>'  # Replace with your CI pipeline ID
+        buildVersionToDownload: 'latest'
+        artifactName: 'PowerBIArtifacts'
+        targetPath: '$(Pipeline.Workspace)/PowerBIArtifacts'
+
+    # Step 3: Deploy Power BI Reports and Models
     - task: PowerShell@2
-      displayName: 'Deploy Power BI Reports and Models'
+      displayName: Deploy Power BI Reports and Models
       inputs:
         targetType: 'inline'
         script: |
           Write-Host "Starting deployment of Power BI files to UAT..."
 
-          # Set the Workspace ID directly for UAT
+          # Workspace ID for UAT
           $workspaceId = "$(workspace_id_uat)"
           Write-Host "Workspace ID set to UAT: $workspaceId"
 
           # Authenticate to Power BI Service using Service Principal
           $credential = New-Object System.Management.Automation.PSCredential(
-            "$(clinetid)", 
-            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
+            "$(clinetid)",  # Client ID
+            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)  # Client Secret
           )
 
           Write-Host "Authenticating with Power BI Service..."
@@ -2742,9 +2753,11 @@ stages:
           # Deploy .pbism files (Power BI Semantic Models)
           Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbism" -Recurse | ForEach-Object {
               Write-Host "Deploying semantic model: $($_.FullName)"
+              # Add additional logic if needed
           }
 
-          Write-Host "Deployment to UAT completed successfully."
+          Write-Host "Deployment completed successfully for UAT."
+
 
 
 
