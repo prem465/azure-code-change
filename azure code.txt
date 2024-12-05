@@ -2684,7 +2684,7 @@ steps:
 trigger: none  # Trigger manually or by the CI pipeline artifact
 
 variables:
-- group: powerbi  # Variable group name for credentials
+- group: powerbi  # Variable group for credentials
 workspace_id_uat: a4628c7b-adda-4285-8c1f-758b19162d0b  # UAT Workspace ID
 
 stages:
@@ -2697,22 +2697,17 @@ stages:
       vmImage: 'windows-latest'
     steps:
 
-    # Step 1: Install Power BI Module
+    # Step 1: Install and Import Power BI Module
     - task: PowerShell@2
       displayName: Install and Import Power BI Module
       inputs:
         targetType: 'inline'
         script: |
-          Write-Host "Checking if the MicrosoftPowerBIMgmt module is already installed..."
+          Write-Host "Checking if the MicrosoftPowerBIMgmt module is installed..."
           if (-not (Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt)) {
-              Write-Host "MicrosoftPowerBIMgmt module not found. Installing now..."
+              Write-Host "Module not found. Installing..."
               Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
-          } else {
-              Write-Host "MicrosoftPowerBIMgmt module is already installed."
           }
-
-          # Import the module into the session
-          Write-Host "Importing MicrosoftPowerBIMgmt module..."
           Import-Module -Name MicrosoftPowerBIMgmt
           Write-Host "Power BI module imported successfully."
 
@@ -2722,7 +2717,7 @@ stages:
       inputs:
         buildType: 'specific'
         project: '$(System.TeamProjectId)'  # Current project
-        pipeline: '<CI_PIPELINE_ID>'  # Replace with your CI pipeline ID
+        pipeline: '<CI_PIPELINE_ID>'  # Replace with the CI pipeline ID
         buildVersionToDownload: 'latest'
         artifactName: 'PowerBIArtifacts'
         targetPath: '$(Pipeline.Workspace)/PowerBIArtifacts'
@@ -2735,32 +2730,38 @@ stages:
         script: |
           Write-Host "Starting deployment of Power BI files to UAT..."
 
-          # Workspace ID for UAT
-          $workspaceId = "$(workspace_id_uat)"
-          Write-Host "Workspace ID set to UAT: $workspaceId"
-
           # Authenticate to Power BI Service using Service Principal
           $credential = New-Object System.Management.Automation.PSCredential(
-            "$(clinetid)",  # Client ID
-            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)  # Client Secret
+            "$(clinetid)",  # Correct spelling of Client ID
+            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
           )
-
           Write-Host "Authenticating with Power BI Service..."
           Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "$(tenantid)"
 
           # Deploy .pbir files (Power BI Reports)
-          Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbir" -Recurse | ForEach-Object {
-              Write-Host "Deploying report: $($_.FullName)"
-              Import-PowerBIReport -Path $_.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite
+          $reportFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbir" -Recurse
+          if ($reportFiles.Count -eq 0) {
+              Write-Host "No .pbir files found for deployment."
+          } else {
+              $reportFiles | ForEach-Object {
+                  Write-Host "Deploying report: $($_.FullName)"
+                  Import-PowerBIReport -Path $_.FullName -WorkspaceId "$(workspace_id_uat)" -ConflictAction Overwrite
+              }
           }
 
           # Deploy .pbism files (Power BI Semantic Models)
-          Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbism" -Recurse | ForEach-Object {
-              Write-Host "Deploying semantic model: $($_.FullName)"
-              # Add additional logic if needed
+          $modelFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbism" -Recurse
+          if ($modelFiles.Count -eq 0) {
+              Write-Host "No .pbism files found for deployment."
+          } else {
+              $modelFiles | ForEach-Object {
+                  Write-Host "Deploying semantic model: $($_.FullName)"
+                  # Add additional deployment logic for .pbism files if needed
+              }
           }
 
           Write-Host "Deployment completed successfully for UAT."
+
 
 
 
