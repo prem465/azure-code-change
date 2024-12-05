@@ -2771,3 +2771,52 @@ stages:
           }
 
           Write-Host "Deployment completed successfully for UAT."
+--------------------------------
+
+trigger: none  # Trigger manually or by the CI pipeline artifact
+
+resources:
+  pipelines:
+    - pipeline: ciPipeline  # Reference name for the CI pipeline
+      project: Power-BI  # Replace with your actual project name
+      source: Power-BI-(CI)  
+
+variables:
+  - group: powerbi
+  - name: workspace_id_uat
+    value: a4628c7b-adda-4285-8c1f-758b19162d0b
+
+stages:
+- stage: Deploy
+  displayName: "Continuous Deployment"
+  jobs:
+  - job: DeployReports
+    displayName: "Deploy Reports to Power BI workspace"
+    pool:
+      vmImage: windows-latest
+    steps:
+    # Step 1: Install Power BI Module
+    - task: PowerShell@2
+      displayName: Install and Import Power BI Module
+      inputs:
+        targetType: 'inline'
+        script: |
+          # [Your script here]
+
+    # Step 2: Download Artifacts from CI Pipeline
+    - task: DownloadPipelineArtifact@2
+      displayName: Download Artifacts from CI Pipeline
+      inputs:
+        source: 'pipeline'
+        pipeline: 'ciPipeline'  # Matches the alias in resources
+        artifact: 'PowerBIArtifacts'  # Exact artifact name
+        path: $(Pipeline.Workspace)
+
+    # Step 3: Deploy Power BI Reports and Models
+    - task: PowerShell@2
+      displayName: Deploy Power BI Reports and Models
+      inputs:
+        targetType: 'inline'
+        script: |
+          # [Your script here]
+
