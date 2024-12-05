@@ -2862,3 +2862,14 @@ stages:
           }
 
           Write-Host "Deployment completed successfully for UAT."
+-------------------------------------------------------------------------
+
+- task: DownloadPipelineArtifact@2
+      displayName: Download Artifacts from CI Pipeline
+      inputs:
+        buildType: 'specific'
+        project: 'Power-BI'  # Replace with your project name
+        definition: 'Power-BI-(CI)'  # Replace with your CI pipeline name
+        buildVersionToDownload: 'latest'
+        artifactName: 'PowerBIArtifacts'  # Ensure the artifact name matches exactly
+        targetPath: '$(Pipeline.Workspace)'
