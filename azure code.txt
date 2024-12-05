@@ -3150,10 +3150,10 @@ CI with auth
 
 
 trigger:
-- main  # Adjust branch as needed
+- main  # Adjust as needed
 
 variables:
-- group: powerbi  # This references the variable group containing tenantid, clinetid, Clientsecret
+- group: powerbi  # References tenantid, clinetid, Clientsecret
 
 pool:
   vmImage: 'windows-latest'
@@ -3184,9 +3184,9 @@ steps:
           Write-Host "Changes detected. Proceeding..."
       }
 
-# Step 3: Install Power BI Modules and Authenticate using Manager's Code
+# Step 3: Install Power BI Modules and Authenticate to Confirm Dev Environment
 - task: PowerShell@2
-  displayName: "Authenticate and Test Access to Dev Environment"
+  displayName: "Authenticate and Confirm Dev Environment"
   inputs:
     targetType: 'inline'
     script: |
@@ -3210,11 +3210,15 @@ steps:
 
       Write-Host "Listing Workspaces..."
       $workspaces = Get-PowerBIWorkspace -Scope Organization
-      if ($workspaces) {
-        Write-Host "Successfully listed workspaces."
-      } else {
-        Write-Error "No workspaces found or cannot access environment!"
+
+      # Check for the Dev workspace by name and ID
+      $devWorkspace = $workspaces | Where-Object { $_.Name -eq "Version Control[Dev]" -and $_.Id -eq "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d" }
+
+      if (-not $devWorkspace) {
+        Write-Error "Dev workspace 'Version Control[Dev]' with ID 'c017440f-4a5b-46bd-a2c0-93ee3f04ab4d' not found. This might not be the Dev environment."
         exit 1
+      } else {
+        Write-Host "Confirmed Dev environment with workspace 'Version Control[Dev]' (ID: c017440f-4a5b-46bd-a2c0-93ee3f04ab4d)."
       }
 
 # Step 4: Publish Artifacts
@@ -3223,4 +3227,3 @@ steps:
   inputs:
     pathToPublish: '$(System.DefaultWorkingDirectory)'
     artifactName: 'PowerBIArtifacts'
-
