@@ -3142,3 +3142,85 @@ stages:
 
           Write-Host "Deployment completed successfully for UAT."
       pwsh: false  # Use Windows PowerShell instead of PowerShell Core
+
+_________________________________________________________________________________
+
+CI with auth
+
+
+
+trigger:
+- main  # Adjust branch as needed
+
+variables:
+- group: powerbi  # This references the variable group containing tenantid, clinetid, Clientsecret
+
+pool:
+  vmImage: 'windows-latest'
+
+steps:
+# Step 1: Checkout Repository with Full History
+- checkout: self
+  displayName: "Checkout Repository"
+  fetchDepth: 0
+
+# Step 2: Detect Changes in .pbism and .pbir Files
+- task: PowerShell@2
+  displayName: "Detect Changes in Power BI Files"
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "Detecting changes in Power BI files..."
+      $pbismChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+      $pbirChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+
+      Write-Host "Detected Semantic Model Changes (.pbism): $($pbismChanges)"
+      Write-Host "Detected Report Changes (.pbir): $($pbirChanges)"
+
+      if ($pbismChanges.Count -eq 0 -and $pbirChanges.Count -eq 0) {
+          Write-Host "No changes detected in .pbism or .pbir files. Exiting..."
+          exit 0
+      } else {
+          Write-Host "Changes detected. Proceeding..."
+      }
+
+# Step 3: Install Power BI Modules and Authenticate using Manager's Code
+- task: PowerShell@2
+  displayName: "Authenticate and Test Access to Dev Environment"
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "Installing MicrosoftPowerBIMgmt modules..."
+      Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
+
+      Write-Host "Importing modules..."
+      Import-Module MicrosoftPowerBIMgmt
+      Import-Module MicrosoftPowerBIMgmt.Profile
+      Import-Module MicrosoftPowerBIMgmt.Reports
+
+      $tenantId = "$(tenantid)"
+      $clientId = "$(clinetid)"
+      $clientSecret = "$(Clientsecret)"
+
+      $secureSecret = ConvertTo-SecureString $clientSecret -AsPlainText -Force
+      $credential = New-Object System.Management.Automation.PSCredential($clientId, $secureSecret)
+
+      Write-Host "Connecting to Power BI Service..."
+      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+
+      Write-Host "Listing Workspaces..."
+      $workspaces = Get-PowerBIWorkspace -Scope Organization
+      if ($workspaces) {
+        Write-Host "Successfully listed workspaces."
+      } else {
+        Write-Error "No workspaces found or cannot access environment!"
+        exit 1
+      }
+
+# Step 4: Publish Artifacts
+- task: PublishBuildArtifacts@1
+  displayName: "Publish Power BI Artifacts"
+  inputs:
+    pathToPublish: '$(System.DefaultWorkingDirectory)'
+    artifactName: 'PowerBIArtifacts'
+
