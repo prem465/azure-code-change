@@ -2968,41 +2968,53 @@ stages:
 
 -------------------------------------------------------------------
 
-# Step 1: Install and Import Power BI Module
-- task: PowerShell@2
-  displayName: Install and Import Power BI Module
-  inputs:
-    targetType: 'inline'
-    script: |
-      Write-Host "PowerShell Version:"
-      $PSVersionTable
+steps:
+    # Step 1: Install and Import Power BI Module
+    - task: PowerShell@2
+      displayName: Install and Import Power BI Module
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "PowerShell Version:"
+          $PSVersionTable
 
-      # Update NuGet provider
-      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+          # Update the NuGet provider
+          Write-Host "Updating NuGet provider..."
+          Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction Stop
 
-      # Update PowerShellGet module
-      Write-Host "Updating PowerShellGet module..."
-      Install-Module -Name PowerShellGet -Force -AllowClobber -ErrorAction Stop
+          # Update PowerShellGet module
+          Write-Host "Updating PowerShellGet module..."
+          Install-Module -Name PowerShellGet -Force -AllowClobber -ErrorAction Stop -Scope AllUsers
 
-      # Install the entire MicrosoftPowerBIMgmt suite
-      Write-Host "Installing MicrosoftPowerBIMgmt modules..."
-      Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          # Set Execution Policy
+          Write-Host "Setting execution policy..."
+          Set-ExecutionPolicy -ExecutionPolicy Unrestricted -Scope LocalMachine -Force
 
-      # Import all sub-modules
-      Write-Host "Importing MicrosoftPowerBIMgmt modules..."
-      Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop -Force -Verbose
+          # Install MicrosoftPowerBIMgmt module in AllUsers scope
+          Write-Host "Installing MicrosoftPowerBIMgmt modules..."
+          Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -ErrorAction Stop -Scope AllUsers
 
-      # Display loaded modules
-      Write-Host "Loaded Modules:"
-      Get-Module -ListAvailable MicrosoftPowerBIMgmt*
+          # Add the module path to PSModulePath
+          $modulePath = "$env:ProgramFiles\WindowsPowerShell\Modules"
+          Write-Host "Adding $modulePath to PSModulePath"
+          $env:PSModulePath = "$env:PSModulePath;$modulePath"
 
-      # Display PSModulePath
-      Write-Host "PSModulePath is: $env:PSModulePath"
+          # Import the module
+          Write-Host "Importing MicrosoftPowerBIMgmt modules..."
+          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop -Force -Verbose
 
-      # Verify that Import-PowerBIReport cmdlet is available
-      if (Get-Command -Name 'Import-PowerBIReport' -ErrorAction SilentlyContinue) {
-          Write-Host "Import-PowerBIReport cmdlet is available."
-      } else {
-          Write-Error "Import-PowerBIReport cmdlet is not available."
-      }
-    pwsh: false  # Use Windows PowerShell instead of PowerShell Core
+          # Verify that Import-PowerBIReport cmdlet is available
+          if (Get-Command -Name 'Import-PowerBIReport' -ErrorAction SilentlyContinue) {
+              Write-Host "Import-PowerBIReport cmdlet is available."
+          } else {
+              Write-Error "Import-PowerBIReport cmdlet is not available."
+          }
+
+          # Output available modules
+          Write-Host "Available Modules:"
+          Get-Module -ListAvailable
+
+          # Output PSModulePath
+          Write-Host "PSModulePath is: $env:PSModulePath"
+
+        pwsh: false  # Use Windows PowerShell instead of PowerShell Core
