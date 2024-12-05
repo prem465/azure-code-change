@@ -2718,7 +2718,15 @@ stages:
                 Import-Module MicrosoftPowerBIMgmt.Reports
                 Write-Host "Modules installed and imported successfully."
 
-          # Step 2: Deploy Power BI Reports and Models
+          # Step 2: Download Artifacts from CI Pipeline
+          - task: DownloadPipelineArtifact@2
+            displayName: "Download Artifacts from CI Pipeline"
+            inputs:
+              buildType: 'current'
+              artifactName: 'PowerBIArtifacts' # Ensure this matches the artifact name in the CI pipeline
+              targetPath: '$(Pipeline.Workspace)/PowerBIArtifacts'
+
+          # Step 3: Deploy Power BI Reports and Models
           - task: PowerShell@2
             displayName: "Deploy Power BI Reports and Models"
             inputs:
@@ -2741,16 +2749,24 @@ stages:
 
                 # Deploy .pbir files (Power BI Reports)
                 $reportFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbir" -Recurse
-                foreach ($file in $reportFiles) {
-                    Write-Host "Deploying report: $($file.FullName)"
-                    Import-PowerBIReport -Path $file.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite
+                if ($reportFiles.Count -eq 0) {
+                    Write-Host "No .pbir files found for deployment."
+                } else {
+                    foreach ($file in $reportFiles) {
+                        Write-Host "Deploying report: $($file.FullName)"
+                        Import-PowerBIReport -Path $file.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite
+                    }
                 }
 
                 # Deploy .pbism files (Power BI Semantic Models)
                 $semanticModelFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/**/*.pbism" -Recurse
-                foreach ($file in $semanticModelFiles) {
-                    Write-Host "Deploying semantic model: $($file.FullName)"
-                    # Add deployment logic for semantic models here if required
+                if ($semanticModelFiles.Count -eq 0) {
+                    Write-Host "No .pbism files found for deployment."
+                } else {
+                    foreach ($file in $semanticModelFiles) {
+                        Write-Host "Deploying semantic model: $($file.FullName)"
+                        # Add deployment logic for semantic models here if required
+                    }
                 }
 
                 Write-Host "Deployment completed successfully for UAT."
