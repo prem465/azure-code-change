@@ -3018,3 +3018,127 @@ steps:
           Write-Host "PSModulePath is: $env:PSModulePath"
 
         pwsh: false  # Use Windows PowerShell instead of PowerShell Core
+
+
+
+
+---------------------------------------------------------------------
+
+
+trigger: none  # Trigger manually or by the CI pipeline artifact
+
+resources:
+  pipelines:
+    - pipeline: ciPipeline  # Reference name for the CI pipeline
+      project: Power-BI  # Replace with your actual project name
+      source: Power-BI-(CI)  # The exact name of your CI pipeline
+      trigger: true  # Optional: Enable triggering the CD pipeline after CI completes
+
+variables:
+  - group: powerbi  # Your variable group containing the variables
+  - name: workspace_id_uat
+    value: a4628c7b-adda-4285-8c1f-758b19162d0b
+
+stages:
+- stage: Deploy
+  displayName: "Continuous Deployment"
+  jobs:
+  - job: DeployReports
+    displayName: "Deploy Reports to Power BI workspace"
+    pool:
+      vmImage: windows-latest
+    steps:
+    # Step 1: Download Artifacts from CI Pipeline
+    - download: ciPipeline  # Reference to the pipeline resource defined above
+      artifact: 'PowerBIArtifacts'  # Exact artifact name from the CI pipeline
+      root: $(Pipeline.Workspace)  # Destination path for the downloaded artifacts
+
+    # Step 2: Deploy Power BI Reports using REST API
+    - task: PowerShell@2
+      displayName: Deploy Power BI Reports and Models via REST API
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting deployment of Power BI files to UAT..."
+
+          $tenantId = "$(tenantid)"
+          $clientId = "$(clinetid)"
+          $clientSecret = "$(Clientsecret)"
+          $workspaceId = "$(workspace_id_uat)"
+
+          # Output the variables for debugging (optional, remove in production)
+          Write-Host "Tenant ID: $tenantId"
+          Write-Host "Client ID: $clientId"
+          Write-Host "Workspace ID: $workspaceId"
+
+          # Authenticate and get an access token
+          $tokenResponse = Invoke-RestMethod -Method Post -Uri "https://login.microsoftonline.com/$tenantId/oauth2/token" -Body @{
+              grant_type    = "client_credentials"
+              client_id     = $clientId
+              client_secret = $clientSecret
+              resource      = "https://analysis.windows.net/powerbi/api"
+          }
+
+          if ($tokenResponse -and $tokenResponse.access_token) {
+              Write-Host "Successfully obtained access token."
+          } else {
+              Write-Error "Failed to obtain access token."
+              exit 1
+          }
+
+          $accessToken = $tokenResponse.access_token
+
+          # Set up the authorization header
+          $headers = @{
+              "Authorization" = "Bearer $accessToken"
+          }
+
+          # Find .pbix files
+          $reportFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/**/*.pbix" -Recurse
+
+          if ($reportFiles.Count -eq 0) {
+              Write-Host "No report files (.pbix) found. Skipping deployment."
+          } else {
+              foreach ($file in $reportFiles) {
+                  Write-Host "Deploying report: $($file.FullName)"
+
+                  # Read the file content
+                  $fileContent = [IO.File]::ReadAllBytes($file.FullName)
+
+                  # Create a boundary for the multipart/form-data
+                  $boundary = [System.Guid]::NewGuid().ToString()
+                  $contentType = "multipart/form-data; boundary=`"$boundary`""
+
+                  # Build the body
+                  $body = "--$boundary`r`n"
+                  $body += "Content-Disposition: form-data; name=`"file`"; filename=`"$($file.Name)`"`r`n"
+                  $body += "Content-Type: application/octet-stream`r`n`r`n"
+                  $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($body)
+                  $fileBytes = $fileContent
+                  $endBoundary = "`r`n--$boundary--`r`n"
+                  $endBoundaryBytes = [System.Text.Encoding]::UTF8.GetBytes($endBoundary)
+
+                  # Combine the byte arrays
+                  $memoryStream = New-Object System.IO.MemoryStream
+                  $memoryStream.Write($bodyBytes, 0, $bodyBytes.Length)
+                  $memoryStream.Write($fileBytes, 0, $fileBytes.Length)
+                  $memoryStream.Write($endBoundaryBytes, 0, $endBoundaryBytes.Length)
+                  $memoryStream.Position = 0
+
+                  # Define the URI
+                  $uri = "https://api.powerbi.com/v1.0/myorg/groups/$workspaceId/imports?datasetDisplayName=$($file.BaseName)&nameConflict=Overwrite"
+
+                  # Make the POST request
+                  try {
+                      $response = Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType $contentType -Body $memoryStream -TimeoutSec 600
+                      Write-Host "Successfully deployed report: $($file.Name)"
+                  } catch {
+                      Write-Error "Failed to deploy report $($file.Name): $_"
+                  } finally {
+                      $memoryStream.Dispose()
+                  }
+              }
+          }
+
+          Write-Host "Deployment completed successfully for UAT."
+      pwsh: false  # Use Windows PowerShell instead of PowerShell Core
