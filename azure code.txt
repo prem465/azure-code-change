@@ -2966,3 +2966,43 @@ stages:
           Write-Host "Deployment completed successfully for UAT."
         pwsh: false  # Use Windows PowerShell instead of PowerShell Core
 
+-------------------------------------------------------------------
+
+# Step 1: Install and Import Power BI Module
+- task: PowerShell@2
+  displayName: Install and Import Power BI Module
+  inputs:
+    targetType: 'inline'
+    script: |
+      Write-Host "PowerShell Version:"
+      $PSVersionTable
+
+      # Update NuGet provider
+      Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force
+
+      # Update PowerShellGet module
+      Write-Host "Updating PowerShellGet module..."
+      Install-Module -Name PowerShellGet -Force -AllowClobber -ErrorAction Stop
+
+      # Install the entire MicrosoftPowerBIMgmt suite
+      Write-Host "Installing MicrosoftPowerBIMgmt modules..."
+      Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+
+      # Import all sub-modules
+      Write-Host "Importing MicrosoftPowerBIMgmt modules..."
+      Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop -Force -Verbose
+
+      # Display loaded modules
+      Write-Host "Loaded Modules:"
+      Get-Module -ListAvailable MicrosoftPowerBIMgmt*
+
+      # Display PSModulePath
+      Write-Host "PSModulePath is: $env:PSModulePath"
+
+      # Verify that Import-PowerBIReport cmdlet is available
+      if (Get-Command -Name 'Import-PowerBIReport' -ErrorAction SilentlyContinue) {
+          Write-Host "Import-PowerBIReport cmdlet is available."
+      } else {
+          Write-Error "Import-PowerBIReport cmdlet is not available."
+      }
+    pwsh: false  # Use Windows PowerShell instead of PowerShell Core
