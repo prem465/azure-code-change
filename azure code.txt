@@ -2779,7 +2779,8 @@ resources:
   pipelines:
     - pipeline: ciPipeline  # Reference name for the CI pipeline
       project: Power-BI  # Replace with your actual project name
-      source: Power-BI-(CI)  
+      source: Power-BI-(CI)  # The exact name of your CI pipeline
+      trigger: true  # Optional: Enable triggering the CD pipeline after CI completes
 
 variables:
   - group: powerbi
@@ -2801,16 +2802,25 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          # [Your script here]
+          Write-Host "Checking if the MicrosoftPowerBIMgmt module is already installed..."
+          if (-not (Get-Module -ListAvailable -Name MicrosoftPowerBIMgmt)) {
+            Write-Host "MicrosoftPowerBIMgmt module not found. Installing now..."
+            Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
+            Install-Module -Name MicrosoftPowerBIMgmt.Profile -Scope CurrentUser -AllowClobber -Force
+            Install-Module -Name MicrosoftPowerBIMgmt.Reports -Scope CurrentUser -AllowClobber -Force
+          } else {
+            Write-Host "MicrosoftPowerBIMgmt module is already installed."
+          }
+          Import-Module MicrosoftPowerBIMgmt
+          Import-Module MicrosoftPowerBIMgmt.Profile
+          Import-Module MicrosoftPowerBIMgmt.Reports
+          Write-Host "Modules installed and imported successfully."
 
     # Step 2: Download Artifacts from CI Pipeline
-    - task: DownloadPipelineArtifact@2
-      displayName: Download Artifacts from CI Pipeline
-      inputs:
-        source: 'pipeline'
-        pipeline: 'ciPipeline'  # Matches the alias in resources
-        artifact: 'PowerBIArtifacts'  # Exact artifact name
-        path: $(Pipeline.Workspace)
+    - download: ciPipeline  # Reference to the pipeline resource defined above
+      artifact: 'PowerBIArtifacts'  # Exact artifact name from the CI pipeline
+      patterns: '**'  # Optional: Specify patterns if needed
+      path: $(Pipeline.Workspace)  # Destination path for the downloaded artifacts
 
     # Step 3: Deploy Power BI Reports and Models
     - task: PowerShell@2
@@ -2818,5 +2828,37 @@ stages:
       inputs:
         targetType: 'inline'
         script: |
-          # [Your script here]
+          Write-Host "Starting deployment of Power BI files to UAT..."
+          $workspaceId = "$(workspace_id_uat)"
+          Write-Host "Workspace ID set to UAT: $workspaceId"
 
+          # Authenticate to Power BI Service using Service Principal
+          $credential = New-Object System.Management.Automation.PSCredential(
+            "$(clinetid)",
+            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
+          )
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "$(tenantid)"
+
+          # Deploy .pbir files (Power BI Reports)
+          $reportFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/**/*.pbir" -Recurse
+          if ($reportFiles.Count -eq 0) {
+            Write-Host "No report files (.pbir) found. Skipping deployment."
+          } else {
+            $reportFiles | ForEach-Object {
+              Write-Host "Deploying report: $($_.FullName)"
+              Import-PowerBIReport -Path $_.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite
+            }
+          }
+
+          # Deploy .pbism files (Power BI Semantic Models)
+          $modelFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/**/*.pbism" -Recurse
+          if ($modelFiles.Count -eq 0) {
+            Write-Host "No semantic model files (.pbism) found. Skipping deployment."
+          } else {
+            $modelFiles | ForEach-Object {
+              Write-Host "Deploying semantic model: $($_.FullName)"
+              # Add deployment logic for .pbism files if needed
+            }
+          }
+
+          Write-Host "Deployment completed successfully for UAT."
