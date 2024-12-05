@@ -2709,6 +2709,11 @@ stages:
               Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
           }
           Import-Module -Name MicrosoftPowerBIMgmt
+          if (-not (Get-Command -Name Import-PowerBIReport -ErrorAction SilentlyContinue)) {
+              Write-Host "Error: Import-PowerBIReport cmdlet is not available. Please verify the module installation."
+              Get-Module -ListAvailable
+              exit 1
+          }
           Write-Host "Power BI module imported successfully."
 
     # Step 2: Download Artifacts from CI Pipeline
@@ -2763,14 +2768,7 @@ stages:
           Write-Host "Deployment completed successfully for UAT."
 
 
-
-
-
-
-
-
-
-    # Step 4: Post-Deployment Success Logs
+ # Step 4: Post-Deployment Success Logs
     - script: |
         Write-Host "Deployment completed successfully for workspace ID: $(workspace_id_uat)"
       displayName: 'Log Deployment Success'
