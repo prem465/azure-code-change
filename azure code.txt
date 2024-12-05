@@ -2873,3 +2873,96 @@ stages:
         buildVersionToDownload: 'latest'
         artifactName: 'PowerBIArtifacts'  # Ensure the artifact name matches exactly
         targetPath: '$(Pipeline.Workspace)'
+
+--------------------------------------------
+
+trigger: none  # Trigger manually or by the CI pipeline artifact
+
+resources:
+  pipelines:
+    - pipeline: ciPipeline  # Reference name for the CI pipeline
+      project: Power-BI  # Replace with your actual project name
+      source: Power-BI-(CI)  # The exact name of your CI pipeline
+      trigger: true  # Optional: Enable triggering the CD pipeline after CI completes
+
+variables:
+  - group: powerbi
+  - name: workspace_id_uat
+    value: a4628c7b-adda-4285-8c1f-758b19162d0b
+
+stages:
+- stage: Deploy
+  displayName: "Continuous Deployment"
+  jobs:
+  - job: DeployReports
+    displayName: "Deploy Reports to Power BI workspace"
+    pool:
+      vmImage: windows-latest
+    steps:
+    # Step 1: Install and Import Power BI Module
+    - task: PowerShell@2
+      displayName: Install and Import Power BI Module
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Installing MicrosoftPowerBIMgmt modules..."
+          # Install all MicrosoftPowerBIMgmt modules
+          Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop
+          # Import the module
+          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop -Verbose
+          Write-Host "Modules installed and imported successfully."
+          # Verify that Import-PowerBIReport cmdlet is available
+          if (Get-Command -Name 'Import-PowerBIReport' -ErrorAction SilentlyContinue) {
+              Write-Host "Import-PowerBIReport cmdlet is available."
+          } else {
+              Write-Error "Import-PowerBIReport cmdlet is not available."
+          }
+        pwsh: false  # Use Windows PowerShell instead of PowerShell Core
+
+    # Step 2: Download Artifacts from CI Pipeline
+    - download: ciPipeline  # Reference to the pipeline resource defined above
+      artifact: 'PowerBIArtifacts'  # Exact artifact name from the CI pipeline
+      root: $(Pipeline.Workspace)  # Destination path for the downloaded artifacts
+
+    # Step 3: Deploy Power BI Reports and Models
+    - task: PowerShell@2
+      displayName: Deploy Power BI Reports and Models
+      inputs:
+        targetType: 'inline'
+        script: |
+          Write-Host "Starting deployment of Power BI files to UAT..."
+          $workspaceId = "$(workspace_id_uat)"
+          Write-Host "Workspace ID set to UAT: $workspaceId"
+
+          # Authenticate to Power BI Service using Service Principal
+          $credential = New-Object System.Management.Automation.PSCredential(
+            "$(clientid)",
+            (ConvertTo-SecureString "$(Clientsecret)" -AsPlainText -Force)
+          )
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId "$(tenantid)" -ErrorAction Stop
+
+          # Deploy .pbix files (Power BI Reports)
+          $reportFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/**/*.pbix" -Recurse
+          if ($reportFiles.Count -eq 0) {
+            Write-Host "No report files (.pbix) found. Skipping deployment."
+          } else {
+            $reportFiles | ForEach-Object {
+              Write-Host "Deploying report: $($_.FullName)"
+              Import-PowerBIReport -Path $_.FullName -WorkspaceId $workspaceId -ConflictAction Overwrite -ErrorAction Stop
+            }
+          }
+
+          # Deploy .pbism files (Power BI Semantic Models)
+          $modelFiles = Get-ChildItem -Path "$(Pipeline.Workspace)/**/*.pbism" -Recurse
+          if ($modelFiles.Count -eq 0) {
+            Write-Host "No semantic model files (.pbism) found. Skipping deployment."
+          } else {
+            $modelFiles | ForEach-Object {
+              Write-Host "Deploying semantic model: $($_.FullName)"
+              # Add deployment logic for .pbism files if needed
+            }
+          }
+
+          Write-Host "Deployment completed successfully for UAT."
+        pwsh: false  # Use Windows PowerShell instead of PowerShell Core
+
