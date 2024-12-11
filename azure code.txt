@@ -3233,228 +3233,362 @@ steps:
 
 .pbir logic
 
-trigger:
-- main  # Adjust as needed
+parameters:
+  - name: DEV_WORKSPACE_NAME
+    displayName: "Development Workspace Name"
+    type: string
+    default: 'YourDevWorkspaceName'
 
-variables:
-- group: powerbi  # Contains tenantid, clinetid, Clientsecret
+  - name: UAT_WORKSPACE_NAME
+    displayName: "UAT Workspace Name"
+    type: string
+    default: 'YourUATWorkspaceName'
+
+  - name: DEV_ONELAKE_ENDPOINT
+    displayName: "Dev OneLake Endpoint"
+    type: string
+    default: 'https://dev-onelakeendpoint.fabric.microsoft.com'
+
+  - name: UAT_ONELAKE_ENDPOINT
+    displayName: "UAT OneLake Endpoint"
+    type: string
+    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
+
+trigger:
+  branches:
+    include:
+      - develop
 
 pool:
   vmImage: 'windows-latest'
 
+variables:
+  - group: powerbi
+  - name: DEV_WORKSPACE_NAME
+    value: '${{ parameters.DEV_WORKSPACE_NAME }}'
+  - name: UAT_WORKSPACE_NAME
+    value: '${{ parameters.UAT_WORKSPACE_NAME }}'
+  - name: DEV_ONELAKE_ENDPOINT
+    value: '${{ parameters.DEV_ONELAKE_ENDPOINT }}'
+  - name: UAT_ONELAKE_ENDPOINT
+    value: '${{ parameters.UAT_ONELAKE_ENDPOINT }}'
+
 jobs:
-- job: Job1
-  displayName: "Automated Deployment and Testing Job"
-  steps:
-    - checkout: self
-      fetchDepth: 0
-      displayName: 'Checkout Repository'
+  - job: Job1
+    displayName: "Automated Deployment and Testing Job"
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        displayName: 'Checkout Repository'
 
-    # Step 1: Install Dependencies and Uninstall AzureRM Modules
-    - task: PowerShell@2
-      displayName: 'Install Dependencies and Uninstall AzureRM Modules'
-      inputs:
-        pwsh: true
-        targetType: inline
-        script: |
-          # Uninstall AzureRM Modules
-          Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
-          Write-Host "AzureRM modules uninstalled."
+      # Step 1: Install Dependencies and Uninstall AzureRM Modules
+      - task: PowerShell@2
+        displayName: 'Install Dependencies and Uninstall AzureRM Modules'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            # Uninstall AzureRM Modules
+            Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
+            Write-Host "AzureRM modules uninstalled."
 
-          # Install Required PowerShell Modules
-          if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
-            Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
-          }
-          Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
-          Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
-          Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
+            # Install Required Modules
+            if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
+              Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
+            }
+            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
+            Install-Module -Name Invoke-DQVTesting -Scope CurrentUser -AllowClobber -Force -AllowPrerelease
+            Install-Module -Name Invoke-SemanticModelRefresh -Scope CurrentUser -AllowClobber -Force
 
-          # Create a custom modules directory
-          if (-not (Test-Path -Path ".\.nuget\custom_modules")) {
-            New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
-          }
+            # Create custom modules directory
+            if (-not (Test-Path -Path ".\.nuget\custom_modules")) {
+              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
+            }
 
-          # Download FabricPS-PBIP module files
-          @(
-            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-            "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-          ) | ForEach-Object {
-            Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
-          }
+            # Download FabricPS-PBIP module files
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
+            }
 
-    # Step 2: Deploy Changes, Conduct Testing, and Validate Data Refresh
-    - task: PowerShell@2
-      displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
-      inputs:
-        pwsh: true
-        targetType: inline
-        script: |
-          try {
-              Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-              Import-Module Az.Accounts -Force
-              Import-Module MicrosoftPowerBIMgmt -Force
-              Import-Module MicrosoftPowerBIMgmt.Profile
-              Import-Module MicrosoftPowerBIMgmt.Reports
+      # Step 2: Deploy Changes, Conduct Testing, and Validate Data Refresh
+      - task: PowerShell@2
+        displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+                Import-Module Az.Accounts -Force
+                Import-Module MicrosoftPowerBIMgmt -Force
 
-              $tenantId = $env:TENANT_ID.Trim()
-              $clientId = $env:CLIENT_ID
-              $clientSecret = $env:CLIENT_SECRET
+                $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+                $tenantId = $env:TENANT_ID.Trim()
 
-              $secret = $clientSecret | ConvertTo-SecureString -AsPlainText -Force
-              $credential = [System.Management.Automation.PSCredential]::new($clientId, $secret)
+                if ($tenantId.Length -ge 4) { Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'" }
+                if ($credential.UserName.Length -ge 4) { Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'" }
 
-              # Identify if service principal
-              $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-              $isServicePrincipal = $false
-              if ($credential.UserName -match $guidRegex) {
-                $isServicePrincipal = $true
-              }
+                $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+                $isServicePrincipal = $false
 
-              # Convert secure string to plaintext for fabric auth
-              $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
-              $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+                if ($credential.UserName -match $guidRegex) {
+                  $isServicePrincipal = $true
+                }
 
-              Write-Host "Authenticating to Fabric API..."
-              if ($isServicePrincipal) {
-                Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-                  -servicePrincipalSecret $plainTextPwd `
-                  -tenantId $tenantId -reset -Verbose -Debug
-              } else {
-                Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset -Verbose -Debug
-              }
+                # Authenticate to Fabric
+                Write-Host "Authenticating to Fabric API..."
+                if ($isServicePrincipal) {
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                    -servicePrincipalSecret ([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))) `
+                    -tenantId $tenantId -reset -Verbose -Debug
+                } else {
+                  Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset -Verbose -Debug
+                }
 
-              $authToken = Get-FabricAuthToken
-              if (-not $authToken) {
-                Write-Error "Failed to obtain Fabric authentication token."
-                throw "Fabric authentication failed."
-              }
+                $authToken = Get-FabricAuthToken
+                if (-not $authToken) {
+                  Write-Error "Failed to obtain Fabric authentication token."
+                  throw "Fabric authentication failed."
+                } else {
+                  Write-Host "Fabric authentication token obtained successfully."
+                }
 
-              # Set AzCopy Connection for UAT endpoint
-              $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-              $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
-              $oneLakeDomain = $oneLakeUri.Host
+                # Connect to Azure if needed for storage access (optional)
+                Import-Module Az.Accounts -Force
+                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
 
-              $loginResult = azcopy login --service-principal `
-                --application-id $credential.UserName `
-                --tenant-id $tenantId `
-                --trusted-microsoft-suffixes="$oneLakeDomain" `
-                --output-type json | ConvertFrom-Json
+                # AzCopy Authentication
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+                $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+                $oneLakeDomain = $oneLakeUri.Host
 
-              $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
-              if (!$checkResult) {
-                Write-Error "Failed to login to azcopy"
-                throw "AzCopy login failed."
-              }
+                $loginResult = azcopy login --service-principal `
+                  --application-id $credential.UserName `
+                  --tenant-id $tenantId `
+                  --trusted-microsoft-suffixes="$oneLakeDomain" `
+                  --output-type json | ConvertFrom-Json
 
-              Write-Host "Authentication successful."
+                $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
 
-              if ($isServicePrincipal) {
-                Connect-PowerBIServiceAccount -ServicePrincipal `
-                  -Credential $credential `
-                  -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
-              } else {
-                Connect-PowerBIServiceAccount -Credential $credential `
-                  -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
-              }
+                if (!$checkResult) {
+                  Write-Error "Failed to login to azcopy"
+                  throw "AzCopy login failed."
+                }
 
-              Write-Host "Connected to Power BI successfully."
+                Write-Host "Authentication successful."
+                
+                # Connect to Power BI
+                if ($isServicePrincipal) {
+                  Connect-PowerBIServiceAccount -ServicePrincipal `
+                    -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+                } else {
+                  Connect-PowerBIServiceAccount -Credential $credential `
+                    -TenantId $tenantId -ErrorAction Stop -Verbose -Debug
+                }
 
-              Write-Host "Processing changes..."
-              $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
-              $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
-              $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
-              $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
+                Write-Host "Connected to Power BI successfully."
 
-              Write-Host "##[debug]Detected Semantic Model Changes: $($pbipSMChanges)"
-              Write-Host "##[debug]Detected Report Changes: $($pbipRptChanges)"
+                Write-Host "Processing changes..."
 
-              if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
-                  Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
-                  exit 0
-              }
+                # Detect changes
+                $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+                $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+                $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
+                $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
 
-              # Get UAT workspace ID
-              $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
-              if (-not $workspaceObj) {
-                  Write-Error "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
-                  throw
-              }
-              $workspaceID = $workspaceObj.Id
+                Write-Host "##[debug]Detected Semantic Model Changes: $($pbipSMChanges)"
+                Write-Host "##[debug]Detected Report Changes: $($pbipRptChanges)"
 
-              # ----------- Promote Semantic Models (.pbism) ----------- #
-              $smPathsToPromote = @()
-              $filter = "*.pbism"
-              foreach ($change in $pbipSMChanges) {
-                  $parentFolder = Split-Path $change -Parent
-                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder $filter))) {
-                      $parentFolder = Split-Path $parentFolder -Parent
-                  }
-                  $smPathsToPromote += $parentFolder
-              }
-              $smPathsToPromote = $smPathsToPromote | Select-Object -Unique
+                if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
+                    Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+                    exit 0
+                }
 
-              foreach ($promotePath in $smPathsToPromote) {
-                  Write-Host "Promoting semantic model at $promotePath to workspace $($env:UAT_WORKSPACE_NAME)"
-                  $smPromotedItem = Import-FabricItem -workspaceId $workspaceID -path $promotePath -Verbose -Debug
-                  Write-Host "Semantic model imported successfully."
-              }
+                # Get UAT workspace ID
+                $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
 
-              # ----------- Promote Reports (.pbir) ----------- #
-              $rptPathsToPromote = @()
-              $rptFilter = "*.pbir"
-              foreach ($change in $pbipRptChanges) {
-                  $parentFolder = Split-Path $change -Parent
-                  while ($null -ne $parentFolder -and !(Test-Path (Join-Path $parentFolder $rptFilter))) {
-                      $parentFolder = Split-Path $parentFolder -Parent
-                  }
-                  $rptPathsToPromote += $parentFolder
-              }
-              $rptPathsToPromote = $rptPathsToPromote | Select-Object -Unique
+                if (-not $workspaceObj) {
+                    Write-Error "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+                    throw
+                }
 
-              foreach ($promotePath in $rptPathsToPromote) {
-                  Write-Host "Promoting report at $promotePath to workspace $($env:UAT_WORKSPACE_NAME)"
-                  # Directly import the .pbir item
-                  $rptPromotedItem = Import-FabricItem -workspaceId $workspaceID -path $promotePath -Verbose -Debug
-                  Write-Host "Report imported successfully."
-              }
+                $workspaceID = $workspaceObj.Id
 
-              Write-Host "Promotion of changes to UAT workspace completed successfully."
+                # Import Semantic Models if changed
+                $smPathsToPromote = @()
+                $filter = "*.pbism"
 
-              # ----------- DQV Testing (if implemented) ----------- #
-              Write-Host "Starting Data Quality Validation (DQV) testing..."
-              try {
-                  # Replace with actual DQV testing logic
-                  Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
-                  Write-Host "DQV testing completed successfully."
-              } catch {
-                  Write-Error "DQV testing failed: $_"
-                  throw
-              }
+                foreach ($change in $pbipSMChanges) {
+                    $parentFolder = Split-Path $change -Parent
+                    while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                        $parentFolder = Split-Path $parentFolder -Parent
+                    }
+                    $smPathsToPromote += $parentFolder
+                }
 
-              # ----------- Validate Data Refresh ----------- #
-              Write-Host "Validating data refresh..."
-              try {
-                  # Replace with actual data refresh validation logic
-                  Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -RefreshType Full -Wait -Verbose -Debug
-                  Write-Host "Data refresh validated successfully."
-              } catch {
-                  Write-Error "Data refresh validation failed: $_"
-                  throw
-              }
+                $smPathsToPromote = $smPathsToPromote | Select-Object -Unique
+                $smPromotedItems = @()
 
-              Write-Host "All steps completed successfully."
+                # Import semantic models first
+                foreach ($promotePath in $smPathsToPromote) {
+                    Write-Host "Promoting semantic model at $promotePath to workspace $($env:UAT_WORKSPACE_NAME)"
+                    try {
+                        $smPromotedItem = Import-FabricItem -workspaceId $workspaceID -path $promotePath -Verbose -Debug
+                        $smPromotedItems += $smPromotedItem
+                        Write-Host "Semantic model imported successfully."
+                    } catch {
+                        Write-Error "Failed to promote semantic model at $promotePath."
+                        Write-Error "Error Details: $_"
+                        if ($_.Exception.Response) {
+                            $responseContent = $_.Exception.Response.Content
+                            Write-Error "API Response: $responseContent"
+                        }
+                        throw
+                    }
+                }
 
-          } catch {
-              Write-Error "An error occurred: $_"
-              throw
-          }
-      env:
-        CLIENT_SECRET: $(Clientsecret)
-        CLIENT_ID: $(clinetid)
-        TENANT_ID: $(tenantid)
-        # Assuming these environment variables are defined in your variable group or pipeline variables
-        DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
-        UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
-        DEV_ONELAKE_ENDPOINT: $(DEV_ONELAKE_ENDPOINT)
-        UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+                # If no reports changed, we are done
+                if ($pbipRptChanges.Count -eq 0) {
+                    Write-Host "No report changes detected. Semantic models promotion completed."
+                    # Proceed with DQV testing or refresh if needed
+                    Write-Host "Starting Data Quality Validation (DQV) testing..."
+                    try {
+                        Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
+                        Write-Host "DQV testing completed successfully."
+                    } catch {
+                        Write-Error "DQV testing failed: $_"
+                        throw
+                    }
 
+                    Write-Host "Validating data refresh..."
+                    try {
+                        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -RefreshType Full -Wait -Verbose -Debug
+                        Write-Host "Data refresh validated successfully."
+                    } catch {
+                        Write-Error "Data refresh validation failed: $_"
+                        throw
+                    }
+
+                    Write-Host "All steps completed successfully."
+                    exit 0
+                }
+
+                # Retrieve all items in workspace to identify semantic models if needed
+                $items = Invoke-FabricRestMethod -Method GET -Url "workspaces/$workspaceID/items"
+
+                # Import Reports
+                foreach ($change in $pbipRptChanges) {
+                    $parentFolder = Split-Path $change -Parent
+                    $filter = "*.pbir"
+                    while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                        $parentFolder = Split-Path $parentFolder -Parent
+                    }
+                    if ($parentFolder -ne $null) {
+                        # Identify the semantic model for the report
+                        $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
+                        if ($def -eq $null) {
+                            Write-Error "Report definition.pbir not found in $parentFolder"
+                            throw "Report definition not found."
+                        }
+
+                        $reportDefinition = Get-Content $def.FullName | ConvertFrom-Json
+                        $semanticModelPath = $reportDefinition.datasetReference.byPath
+
+                        Write-Host "##[debug] SemanticModelPath: $($semanticModelPath)"
+
+                        $semanticModelName = $null
+                        if ($semanticModelPath -ne $null) {
+                            $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
+                            $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
+                                          Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
+
+                            if ($metadataSM -ne $null) {
+                                $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
+                                if ($metadataSM.Name -eq "item.metadata.json") {
+                                    # Pre-March 2024 logic
+                                    $semanticModelName = $content.displayName
+                                    Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
+                                } else {
+                                    $semanticModelName = $content.metadata.displayName
+                                    Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
+                                }
+                            } else {
+                                Write-Host "##[vso[task.logissue type=error]Semantic Model definition not found in workspace."
+                                throw "Semantic Model definition for the report not found."
+                            }
+                        }
+
+                        # Determine semanticModelId
+                        $semanticModelId = $null
+
+                        # If we just imported semantic models, check if we have it from $smPromotedItems
+                        if ($smPromotedItems.Count -gt 0 -and $semanticModelName) {
+                            $importedSM = $smPromotedItems | Where-Object { $_.displayName -eq $semanticModelName -and $_.type -eq "SemanticModel" }
+                            if ($importedSM) {
+                                $semanticModelId = $importedSM.id
+                            }
+                        }
+
+                        # If not found in imported SMs, try to find from existing items
+                        if (-not $semanticModelId -and $semanticModelName) {
+                            $existingSM = $items | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
+                            if ($existingSM) {
+                                $semanticModelId = $existingSM.id
+                            }
+                        }
+
+                        if (-not $semanticModelId) {
+                            Write-Error "Semantic Model '$semanticModelName' not found in workspace. Cannot import report."
+                            throw "Semantic model for the report not found."
+                        }
+
+                        Write-Host "Promoting report at $parentFolder to workspace $($env:UAT_WORKSPACE_NAME) with semantic model ID: $semanticModelId"
+                        try {
+                            $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $parentFolder -itemProperties @{ semanticModelId = $semanticModelId } -Verbose -Debug
+                            Write-Host "Report imported successfully."
+                        } catch {
+                            Write-Error "Failed to promote report at $parentFolder: $_"
+                            throw
+                        }
+                    }
+                }
+
+                # DQV Testing and Data Refresh after promoting reports
+                Write-Host "Starting Data Quality Validation (DQV) testing..."
+                try {
+                    Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
+                    Write-Host "DQV testing completed successfully."
+                } catch {
+                    Write-Error "DQV testing failed: $_"
+                    throw
+                }
+
+                Write-Host "Validating data refresh..."
+                try {
+                    Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -RefreshType Full -Wait -Verbose -Debug
+                    Write-Host "Data refresh validated successfully."
+                } catch {
+                    Write-Error "Data refresh validation failed: $_"
+                    throw
+                }
+
+                Write-Host "All steps completed successfully."
+
+            } catch {
+                Write-Error "An error occurred: $_"
+                throw
+            }
+        env:
+          CLIENT_SECRET: $(CLIENT_SECRET)
+          CLIENT_ID: $(CLIENT_ID)
+          TENANT_ID: $(TENANT_ID)
+          DEV_WORKSPACE_NAME: $(DEV_WORKSPACE_NAME)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+          DEV_ONELAKE_ENDPOINT: $(DEV_ONELAKE_ENDPOINT)
+          UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
