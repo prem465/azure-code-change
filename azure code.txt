@@ -3281,18 +3281,17 @@ jobs:
         fetchDepth: 0
         displayName: 'Checkout Repository'
 
-      # Step 1: Install Dependencies
       - task: PowerShell@2
         displayName: 'Install Dependencies and Uninstall AzureRM Modules'
         inputs:
           pwsh: true
           targetType: inline
           script: |
-            # Uninstall AzureRM modules
+            # Uninstall AzureRM
             Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
             Write-Host "AzureRM modules uninstalled."
 
-            # Install required modules
+            # Install Required Modules
             if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
               Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
             }
@@ -3304,7 +3303,7 @@ jobs:
               New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
             }
 
-            # Download FabricPS-PBIP module files
+            # Download FabricPS-PBIP module
             @(
               "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
               "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
@@ -3312,7 +3311,6 @@ jobs:
               Invoke-WebRequest -Uri $_ -OutFile ".\.nuget\custom_modules\$(Split-Path $_ -Leaf)"
             }
 
-      # Step 2: Deploy Changes
       - task: PowerShell@2
         displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
         inputs:
@@ -3412,29 +3410,16 @@ jobs:
 
                 $workspaceID = $workspaceObj.Id
 
-                # Import Semantic Models if changed
-                $smPathsToPromote = @()
-                $filter = "*.pbism"
-
-                foreach ($change in $pbipSMChanges) {
-                    $parentFolder = Split-Path $change -Parent
-                    while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
-                        $parentFolder = Split-Path $parentFolder -Parent
-                    }
-                    $smPathsToPromote += $parentFolder
-                }
-                $smPathsToPromote = $smPathsToPromote | Select-Object -Unique
-                $smPromotedItems = @()
-
-                foreach ($promotePath in $smPathsToPromote) {
-                    Write-Host ("Promoting semantic model at {0} to workspace {1}" -f $promotePath, $env:UAT_WORKSPACE_NAME)
+                # Helper function to import a semantic model given a path
+                function Import-SemanticModel($modelPath, $workspaceID) {
+                    Write-Host ("Promoting semantic model at {0} to workspace {1}" -f $modelPath, $env:UAT_WORKSPACE_NAME)
                     try {
-                        $smPromotedItem = Import-FabricItem -workspaceId $workspaceID -path $promotePath -Verbose -Debug
-                        $smPromotedItems += $smPromotedItem
+                        $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelPath -Verbose -Debug
                         Write-Host "Semantic model imported successfully."
+                        return $smItem
                     } catch {
                         $err = $_
-                        Write-Error ("Failed to promote semantic model at {0}: {1}" -f $promotePath, $err)
+                        Write-Error ("Failed to promote semantic model at {0}: {1}" -f $modelPath, $err)
                         if ($err.Exception.Response -and $err.Exception.Response.Content) {
                             Write-Error ("API Response: {0}" -f $err.Exception.Response.Content)
                         }
@@ -3442,8 +3427,34 @@ jobs:
                     }
                 }
 
+                $smPromotedItems = @()
+
+                # If semantic models changed, import them
+                if ($pbipSMChanges.Count -gt 0) {
+                    $smPathsToPromote = @()
+                    $filter = "*.pbism"
+                    foreach ($change in $pbipSMChanges) {
+                        $parentFolder = Split-Path $change -Parent
+                        while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                            $parentFolder = Split-Path $parentFolder -Parent
+                        }
+                        $smPathsToPromote += $parentFolder
+                    }
+                    $smPathsToPromote = $smPathsToPromote | Select-Object -Unique
+
+                    foreach ($promotePath in $smPathsToPromote) {
+                        $smImported = Import-SemanticModel $promotePath $workspaceID
+                        $smPromotedItems += $smImported
+                    }
+                }
+
+                # If no reports changed and we imported semantic models, or no changes:
                 if ($pbipRptChanges.Count -eq 0) {
-                    Write-Host "No report changes detected. Semantic models promotion completed."
+                    if ($pbipSMChanges.Count -gt 0) {
+                        Write-Host "Semantic models promotion completed."
+                    } else {
+                        Write-Host "No changes to reports. Only semantic models or none."
+                    }
                     Write-Host "Starting Data Quality Validation (DQV) testing..."
                     try {
                         Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
@@ -3468,15 +3479,10 @@ jobs:
                     exit 0
                 }
 
-                # Get all items from workspace via Invoke-FabricAPIRequest
+                # For reports: we must always ensure the semantic model is present
                 $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
-                # Assume itemsJson is directly objects, if needed pipe to ConvertFrom-Json if returns raw JSON
-                # If items are not objects, try:
-                # $allItems = $itemsJson | ConvertFrom-Json
-                # If no error previously, we trust they return objects:
-                $allItems = $itemsJson
+                $allItems = $itemsJson # If returns objects directly. If returns raw JSON, do: $allItems = $itemsJson | ConvertFrom-Json
 
-                # Import Reports
                 foreach ($change in $pbipRptChanges) {
                     $parentFolder = Split-Path $change -Parent
                     $filter = "*.pbir"
@@ -3499,43 +3505,26 @@ jobs:
                         $semanticModelName = $null
                         if ($semanticModelPath -ne $null) {
                             $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
-                            $metadataSM = Get-ChildItem -Path $pathToCheck -Recurse -Include "item.metadata.json", ".platform" |
-                                          Where-Object { (Split-Path -Path $_.FullName).EndsWith(".Dataset") -or (Split-Path -Path $_.FullName).EndsWith(".SemanticModel") }
-
-                            if ($metadataSM -ne $null) {
-                                $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
-                                if ($metadataSM.Name -eq "item.metadata.json") {
-                                    $semanticModelName = $content.displayName
-                                    Write-Host ("##[debug] SemanticModelName: {0}" -f $semanticModelName)
-                                } else {
-                                    $semanticModelName = $content.metadata.displayName
-                                    Write-Host ("##[debug] SemanticModelName: {0}" -f $semanticModelName)
-                                }
-                            } else {
-                                Write-Host "##[vso[task.logissue type=error]Semantic Model definition not found."
-                                throw "Semantic Model definition for the report not found."
+                            # Identify semantic model .pbism file (not just metadata)
+                            $pbismFile = Get-ChildItem -Path $pathToCheck -Recurse -Include "*.pbism"
+                            if ($pbismFile -eq $null) {
+                                Write-Error "No .pbism file found for the report's semantic model. Cannot proceed."
+                                throw "Semantic model .pbism not found."
                             }
-                        }
 
-                        # Determine semanticModelId
-                        $semanticModelId = $null
-                        if ($smPromotedItems.Count -gt 0 -and $semanticModelName) {
-                            $importedSM = $smPromotedItems | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
-                            if ($importedSM) {
-                                $semanticModelId = $importedSM.id
+                            # Always re-import the semantic model from this path
+                            $reImportedSM = Import-SemanticModel ($pbismFile.DirectoryName) $workspaceID
+
+                            $semanticModelName = $reImportedSM.displayName
+                            Write-Host ("##[debug] SemanticModelName (from re-import): {0}" -f $semanticModelName)
+                            $semanticModelId = $reImportedSM.id
+                            if (-not $semanticModelId) {
+                                Write-Error ("Semantic Model '{0}' not found/created properly. Cannot import report." -f $semanticModelName)
+                                throw "Semantic model for the report not found."
                             }
-                        }
-
-                        if (-not $semanticModelId -and $semanticModelName) {
-                            $existingSM = $allItems | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
-                            if ($existingSM) {
-                                $semanticModelId = $existingSM.id
-                            }
-                        }
-
-                        if (-not $semanticModelId) {
-                            Write-Error ("Semantic Model '{0}' not found in workspace. Cannot import report." -f $semanticModelName)
-                            throw "Semantic model for the report not found."
+                        } else {
+                            Write-Error "Report definition does not specify a datasetReference.byPath"
+                            throw "No semantic model path for the report."
                         }
 
                         Write-Host ("Promoting report at {0} to workspace {1} with semantic model ID: {2}" -f $parentFolder, $env:UAT_WORKSPACE_NAME, $semanticModelId)
