@@ -3288,7 +3288,7 @@ jobs:
           pwsh: true
           targetType: inline
           script: |
-            # Uninstall AzureRM
+            # Uninstall AzureRM modules
             Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
             Write-Host "AzureRM modules uninstalled."
 
@@ -3304,7 +3304,7 @@ jobs:
               New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force
             }
 
-            # Download FabricPS-PBIP
+            # Download FabricPS-PBIP module files
             @(
               "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
               "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
@@ -3342,7 +3342,9 @@ jobs:
                 $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
                 $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
                 if ($isServicePrincipal) {
-                  Set-FabricAuthToken -servicePrincipalId $credential.UserName -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset -Verbose -Debug
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                    -servicePrincipalSecret $plainTextPwd `
+                    -tenantId $tenantId -reset -Verbose -Debug
                 } else {
                   Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset -Verbose -Debug
                 }
@@ -3466,8 +3468,13 @@ jobs:
                     exit 0
                 }
 
-                # Get all items in workspace
-                $allItems = Get-FabricItem -WorkspaceId $workspaceID
+                # Get all items from workspace via Invoke-FabricAPIRequest
+                $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+                # Assume itemsJson is directly objects, if needed pipe to ConvertFrom-Json if returns raw JSON
+                # If items are not objects, try:
+                # $allItems = $itemsJson | ConvertFrom-Json
+                # If no error previously, we trust they return objects:
+                $allItems = $itemsJson
 
                 # Import Reports
                 foreach ($change in $pbipRptChanges) {
@@ -3513,7 +3520,7 @@ jobs:
                         # Determine semanticModelId
                         $semanticModelId = $null
                         if ($smPromotedItems.Count -gt 0 -and $semanticModelName) {
-                            $importedSM = $smPromotedItems | Where-Object { $_.displayName -eq $semanticModelName -and $_.type -eq "SemanticModel" }
+                            $importedSM = $smPromotedItems | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
                             if ($importedSM) {
                                 $semanticModelId = $importedSM.id
                             }
