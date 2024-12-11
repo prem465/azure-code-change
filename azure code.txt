@@ -3288,7 +3288,7 @@ jobs:
           pwsh: true
           targetType: inline
           script: |
-            # Uninstall AzureRM Modules
+            # Uninstall AzureRM modules
             Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
             Write-Host "AzureRM modules uninstalled."
 
@@ -3329,8 +3329,12 @@ jobs:
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                if ($tenantId.Length -ge 4) { Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'" }
-                if ($credential.UserName.Length -ge 4) { Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'" }
+                if ($tenantId.Length -ge 4) {
+                    Write-Host "Using sanitized tenant ID (partial): '$($tenantId.Substring(0, 4))...'"
+                }
+                if ($credential.UserName.Length -ge 4) {
+                    Write-Host "Using client ID (partial): '$($credential.UserName.Substring(0, 4))...'"
+                }
 
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
                 $isServicePrincipal = $false
@@ -3339,11 +3343,14 @@ jobs:
                   $isServicePrincipal = $true
                 }
 
-                # Authenticate to Fabric
+                # Auth to Fabric
                 Write-Host "Authenticating to Fabric API..."
+                $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
                 if ($isServicePrincipal) {
                   Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-                    -servicePrincipalSecret ([Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))) `
+                    -servicePrincipalSecret $plainTextPwd `
                     -tenantId $tenantId -reset -Verbose -Debug
                 } else {
                   Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset -Verbose -Debug
@@ -3357,12 +3364,10 @@ jobs:
                   Write-Host "Fabric authentication token obtained successfully."
                 }
 
-                # Connect to Azure if needed for storage access (optional)
-                Import-Module Az.Accounts -Force
+                # Connect to Azure for storage access if needed
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
 
-                # AzCopy Authentication
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                # AzCopy Login
                 $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
                 $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
                 $oneLakeDomain = $oneLakeUri.Host
@@ -3381,7 +3386,7 @@ jobs:
                 }
 
                 Write-Host "Authentication successful."
-                
+
                 # Connect to Power BI
                 if ($isServicePrincipal) {
                   Connect-PowerBIServiceAccount -ServicePrincipal `
@@ -3393,7 +3398,6 @@ jobs:
                 }
 
                 Write-Host "Connected to Power BI successfully."
-
                 Write-Host "Processing changes..."
 
                 # Detect changes
@@ -3435,7 +3439,6 @@ jobs:
                 $smPathsToPromote = $smPathsToPromote | Select-Object -Unique
                 $smPromotedItems = @()
 
-                # Import semantic models first
                 foreach ($promotePath in $smPathsToPromote) {
                     Write-Host "Promoting semantic model at $promotePath to workspace $($env:UAT_WORKSPACE_NAME)"
                     try {
@@ -3443,7 +3446,7 @@ jobs:
                         $smPromotedItems += $smPromotedItem
                         Write-Host "Semantic model imported successfully."
                     } catch {
-                        Write-Error "Failed to promote semantic model at $promotePath."
+                        Write-Error "Failed to promote semantic model at $promotePath"
                         Write-Error "Error Details: $_"
                         if ($_.Exception.Response) {
                             $responseContent = $_.Exception.Response.Content
@@ -3453,10 +3456,9 @@ jobs:
                     }
                 }
 
-                # If no reports changed, we are done
+                # If no report changes, done with semantic models
                 if ($pbipRptChanges.Count -eq 0) {
                     Write-Host "No report changes detected. Semantic models promotion completed."
-                    # Proceed with DQV testing or refresh if needed
                     Write-Host "Starting Data Quality Validation (DQV) testing..."
                     try {
                         Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
@@ -3479,8 +3481,8 @@ jobs:
                     exit 0
                 }
 
-                # Retrieve all items in workspace to identify semantic models if needed
-                $items = Invoke-FabricRestMethod -Method GET -Url "workspaces/$workspaceID/items"
+                # Retrieve all items in workspace using Invoke-FabricAPIRequest
+                $items = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
 
                 # Import Reports
                 foreach ($change in $pbipRptChanges) {
@@ -3490,7 +3492,7 @@ jobs:
                         $parentFolder = Split-Path $parentFolder -Parent
                     }
                     if ($parentFolder -ne $null) {
-                        # Identify the semantic model for the report
+                        # Get report definition
                         $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
                         if ($def -eq $null) {
                             Write-Error "Report definition.pbir not found in $parentFolder"
@@ -3511,7 +3513,6 @@ jobs:
                             if ($metadataSM -ne $null) {
                                 $content = Get-Content $metadataSM.FullName | ConvertFrom-Json
                                 if ($metadataSM.Name -eq "item.metadata.json") {
-                                    # Pre-March 2024 logic
                                     $semanticModelName = $content.displayName
                                     Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
                                 } else {
@@ -3519,15 +3520,15 @@ jobs:
                                     Write-Host "##[debug] SemanticModelName: $($semanticModelName)"
                                 }
                             } else {
-                                Write-Host "##[vso[task.logissue type=error]Semantic Model definition not found in workspace."
+                                Write-Host "##[vso[task.logissue type=error]Semantic Model definition not found."
                                 throw "Semantic Model definition for the report not found."
                             }
                         }
 
                         # Determine semanticModelId
                         $semanticModelId = $null
-
-                        # If we just imported semantic models, check if we have it from $smPromotedItems
+                        
+                        # If we just imported semantic models
                         if ($smPromotedItems.Count -gt 0 -and $semanticModelName) {
                             $importedSM = $smPromotedItems | Where-Object { $_.displayName -eq $semanticModelName -and $_.type -eq "SemanticModel" }
                             if ($importedSM) {
@@ -3535,7 +3536,7 @@ jobs:
                             }
                         }
 
-                        # If not found in imported SMs, try to find from existing items
+                        # If not found in imported SMs, try from existing items
                         if (-not $semanticModelId -and $semanticModelName) {
                             $existingSM = $items | Where-Object { $_.type -eq "SemanticModel" -and $_.displayName -eq $semanticModelName }
                             if ($existingSM) {
@@ -3548,12 +3549,12 @@ jobs:
                             throw "Semantic model for the report not found."
                         }
 
-                        Write-Host "Promoting report at $parentFolder to workspace $($env:UAT_WORKSPACE_NAME) with semantic model ID: $semanticModelId"
+                        Write-Host ("Promoting report at {0} to workspace {1} with semantic model ID: {2}" -f $parentFolder, $env:UAT_WORKSPACE_NAME, $semanticModelId)
                         try {
                             $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $parentFolder -itemProperties @{ semanticModelId = $semanticModelId } -Verbose -Debug
                             Write-Host "Report imported successfully."
                         } catch {
-                            Write-Error "Failed to promote report at $parentFolder: $_"
+                            Write-Error ("Failed to promote report ")
                             throw
                         }
                     }
