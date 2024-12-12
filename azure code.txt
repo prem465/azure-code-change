@@ -3312,7 +3312,7 @@ jobs:
             }
 
       - task: PowerShell@2
-        displayName: 'Deploy Changes, Conduct Testing, and Validate Data Refresh'
+        displayName: 'Deploy Changes and Validate Data Refresh'
         inputs:
           pwsh: true
           targetType: inline
@@ -3447,10 +3447,10 @@ jobs:
                     }
                 }
 
-                # If no reports changed, just do refresh if possible and exit
+                # If no reports changed, just refresh if possible and exit
                 if ($pbipRptChanges.Count -eq 0) {
                     Write-Host "No report changes detected. Semantic models (if any) updated."
-                    # Determine a datasetId for refresh
+                    # Determine a datasetId (semanticModelId)
                     $finalSemanticModelId = $null
                     if ($smPromotedItems.Count -gt 0) {
                         $finalSemanticModelId = $smPromotedItems[-1].id
@@ -3463,7 +3463,7 @@ jobs:
 
                     Write-Host "Validating data refresh..."
                     try {
-                        Invoke-SemanticModelRefresh -WorkspaceName $env:UAT_WORKSPACE_NAME -DatasetId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
+                        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
                         Write-Host "Data refresh validated successfully."
                     } catch {
                         $err = $_
@@ -3511,7 +3511,7 @@ jobs:
                             throw "Semantic model .pbism not found."
                         }
 
-                        # Re-import the semantic model from the pbism folder
+                        # Re-import the semantic model
                         $reImportedSM = Import-SemanticModel $($pbismFile.DirectoryName) $workspaceID
                         $semanticModelName = $reImportedSM.displayName
                         $semanticModelId = $reImportedSM.id
@@ -3534,7 +3534,7 @@ jobs:
                     }
                 }
 
-                # After all imports, run data refresh if we have a datasetId
+                # After all imports, run data refresh if we have a semantic model Id
                 if (-not $finalSemanticModelId -and $smPromotedItems.Count -gt 0) {
                     $finalSemanticModelId = $smPromotedItems[-1].id
                 }
@@ -3546,7 +3546,7 @@ jobs:
 
                 Write-Host "Validating data refresh..."
                 try {
-                    Invoke-SemanticModelRefresh -WorkspaceName $env:UAT_WORKSPACE_NAME -DatasetId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
+                    Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
                     Write-Host "Data refresh validated successfully."
                 } catch {
                     $err = $_
