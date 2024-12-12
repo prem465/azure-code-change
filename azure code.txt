@@ -3335,7 +3335,7 @@ jobs:
                   $isServicePrincipal = $true
                 }
 
-                # Authenticate to Fabric
+                # Auth to Fabric
                 Write-Host "Authenticating to Fabric API..."
                 $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
                 $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
@@ -3397,7 +3397,7 @@ jobs:
                 Write-Host "##[debug]Detected Report Changes: $($pbipRptChanges)"
 
                 if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
-                    Write-Host "No changes detected in the Semantic Model or Report folders. Exiting..."
+                    Write-Host "No changes detected. Exiting..."
                     exit 0
                 }
 
@@ -3447,13 +3447,26 @@ jobs:
                     }
                 }
 
-                # If no reports changed, we can run DQV testing and refresh now and exit
+                # If no reports changed, do DQV and Refresh now
                 if ($pbipRptChanges.Count -eq 0) {
-                    Write-Host "No report changes detected. Semantic models (if any) promotion completed."
+                    Write-Host "No report changes detected. Semantic models promotion completed."
+                    # Determine a datasetId for DQV and Refresh
+                    $finalSemanticModelId = $null
+                    if ($smPromotedItems.Count -gt 0) {
+                        $finalSemanticModelId = $smPromotedItems[-1].id
+                    }
+
+                    if (-not $finalSemanticModelId) {
+                        Write-Host "No final semantic model ID available; likely no changes or no model required."
+                        # Possibly skip DQV and refresh if no model?
+                        # If you must run them anyway, you need a DatasetId. If not found, skip:
+                        Write-Host "No datasetId found, skipping DQV and refresh."
+                        exit 0
+                    }
 
                     Write-Host "Starting Data Quality Validation (DQV) testing..."
                     try {
-                        Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
+                        Invoke-DQVTesting -WorkspaceName $env:UAT_WORKSPACE_NAME -Credential $credential -TenantId $tenantId -DatasetId $finalSemanticModelId -Verbose -Debug -LogOutput "Table"
                         Write-Host "DQV testing completed successfully."
                     } catch {
                         $err = $_
@@ -3463,7 +3476,7 @@ jobs:
 
                     Write-Host "Validating data refresh..."
                     try {
-                        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -RefreshType Full -Wait -Verbose -Debug
+                        Invoke-SemanticModelRefresh -WorkspaceName $env:UAT_WORKSPACE_NAME -DatasetId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
                         Write-Host "Data refresh validated successfully."
                     } catch {
                         $err = $_
@@ -3475,9 +3488,11 @@ jobs:
                     exit 0
                 }
 
-                # For reports, always re-import the semantic model from the report's definition to ensure it exists
+                # For reports, always re-import the semantic model referenced by the report
                 $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
                 $allItems = $itemsJson # If needed, pipe to ConvertFrom-Json
+
+                $finalSemanticModelId = $null
 
                 foreach ($change in $pbipRptChanges) {
                     $parentFolder = Split-Path $change -Parent
@@ -3504,17 +3519,18 @@ jobs:
                         }
 
                         $pathToCheck = Join-Path $parentFolder $semanticModelPath.path
-                        # Locate the .pbism file for this report's model
+                        # Locate the .pbism file
                         $pbismFile = Get-ChildItem -Path $pathToCheck -Recurse -Include "*.pbism"
                         if ($pbismFile -eq $null) {
                             Write-Error "No .pbism file found for the report's semantic model."
                             throw "Semantic model .pbism not found."
                         }
 
-                        # Always import the semantic model from this pbism folder to ensure it exists in UAT
+                        # Re-import the semantic model
                         $reImportedSM = Import-SemanticModel $($pbismFile.DirectoryName) $workspaceID
                         $semanticModelName = $reImportedSM.displayName
                         $semanticModelId = $reImportedSM.id
+                        $finalSemanticModelId = $semanticModelId
 
                         if (-not $semanticModelId) {
                             Write-Error ("Semantic Model '{0}' not found/created properly. Cannot import report." -f $semanticModelName)
@@ -3533,10 +3549,21 @@ jobs:
                     }
                 }
 
-                # After all imports done, run DQV testing and data refresh
+                # After all imports, run DQV testing and data refresh
+                # Use $finalSemanticModelId from the last imported semantic model
+                if (-not $finalSemanticModelId -and $smPromotedItems.Count -gt 0) {
+                    # If no reports changed or we didn't set finalSemanticModelId from a report scenario
+                    $finalSemanticModelId = $smPromotedItems[-1].id
+                }
+
+                if (-not $finalSemanticModelId) {
+                    Write-Host "No final semantic model ID found. Cannot run DQV testing or refresh."
+                    exit 0
+                }
+
                 Write-Host "Starting Data Quality Validation (DQV) testing..."
                 try {
-                    Invoke-DQVTesting -WorkspaceId $workspaceID -Credential $credential -TenantId $tenantId -Verbose -Debug
+                    Invoke-DQVTesting -WorkspaceName $env:UAT_WORKSPACE_NAME -Credential $credential -TenantId $tenantId -DatasetId $finalSemanticModelId -Verbose -Debug -LogOutput "Table"
                     Write-Host "DQV testing completed successfully."
                 } catch {
                     $err = $_
@@ -3546,7 +3573,7 @@ jobs:
 
                 Write-Host "Validating data refresh..."
                 try {
-                    Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -RefreshType Full -Wait -Verbose -Debug
+                    Invoke-SemanticModelRefresh -WorkspaceName $env:UAT_WORKSPACE_NAME -DatasetId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
                     Write-Host "Data refresh validated successfully."
                 } catch {
                     $err = $_
