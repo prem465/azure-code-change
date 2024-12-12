@@ -3447,7 +3447,7 @@ jobs:
                     }
                 }
 
-                # If no reports changed, just refresh if possible and exit
+                # If no reports changed, just do refresh if possible and exit
                 if ($pbipRptChanges.Count -eq 0) {
                     Write-Host "No report changes detected. Semantic models (if any) updated."
                     # Determine a datasetId (semanticModelId)
@@ -3463,7 +3463,7 @@ jobs:
 
                     Write-Host "Validating data refresh..."
                     try {
-                        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
+                        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Verbose -Debug
                         Write-Host "Data refresh validated successfully."
                     } catch {
                         $err = $_
@@ -3511,7 +3511,7 @@ jobs:
                             throw "Semantic model .pbism not found."
                         }
 
-                        # Re-import the semantic model
+                        # Re-import the semantic model from the pbism folder
                         $reImportedSM = Import-SemanticModel $($pbismFile.DirectoryName) $workspaceID
                         $semanticModelName = $reImportedSM.displayName
                         $semanticModelId = $reImportedSM.id
@@ -3546,7 +3546,7 @@ jobs:
 
                 Write-Host "Validating data refresh..."
                 try {
-                    Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Wait -Verbose -Debug
+                    Invoke-SemanticModelRefresh -WorkspaceId $workspaceID -SemanticModelId $finalSemanticModelId -Credential $credential -TenantId $tenantId -Environment Public -LogOutput "ADO" -Verbose -Debug
                     Write-Host "Data refresh validated successfully."
                 } catch {
                     $err = $_
