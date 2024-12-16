@@ -3508,7 +3508,7 @@ jobs:
         displayName: 'Checkout Repository'
 
       - task: PowerShell@2
-        displayName: 'Detect Changes and Publish Artifacts'
+        displayName: 'Detect Changes and Archive Artifacts'
         inputs:
           pwsh: true
           targetType: inline
@@ -3519,13 +3519,15 @@ jobs:
             $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
             $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
 
+            $artifactsPath = "$(System.DefaultWorkingDirectory)/artifacts"
+
             if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
-                Write-Host "No changes detected. Exiting build pipeline."
+                Write-Host "No changes detected. Skipping artifact creation."
+                New-Item -Path $artifactsPath -ItemType Directory -Force  # Ensure directory exists
                 exit 0
             }
 
-            Write-Host "=== Archiving Artifacts ==="
-            $artifactsPath = "$(System.DefaultWorkingDirectory)/artifacts"
+            Write-Host "=== Creating Artifacts Directory ==="
             New-Item -ItemType Directory -Force -Path $artifactsPath
 
             if ($pbipSMChanges.Count -gt 0) {
@@ -3533,6 +3535,7 @@ jobs:
                 $pbipSMChanges | ForEach-Object {
                     $sourcePath = Join-Path -Path "$(System.DefaultWorkingDirectory)" -ChildPath $_
                     $destinationPath = Join-Path -Path $artifactsPath -ChildPath "SemanticModels"
+                    New-Item -ItemType Directory -Force -Path $destinationPath
                     Copy-Item -Path $sourcePath -Destination $destinationPath -Recurse -Force
                 }
             }
@@ -3542,11 +3545,12 @@ jobs:
                 $pbipRptChanges | ForEach-Object {
                     $sourcePath = Join-Path -Path "$(System.DefaultWorkingDirectory)" -ChildPath $_
                     $destinationPath = Join-Path -Path $artifactsPath -ChildPath "Reports"
+                    New-Item -ItemType Directory -Force -Path $destinationPath
                     Copy-Item -Path $sourcePath -Destination $destinationPath -Recurse -Force
                 }
             }
 
-            Write-Host "Artifacts archived successfully."
+            Write-Host "Artifacts archived successfully. Path: $artifactsPath"
         env:
           CLIENT_SECRET: $(Clientsecret)
           CLIENT_ID: $(clinetid)
@@ -3557,6 +3561,7 @@ jobs:
         inputs:
           PathtoPublish: '$(System.DefaultWorkingDirectory)/artifacts'
           ArtifactName: 'PowerBIArtifacts'
+
 -----------------------------------------------------------------------------
 RELEASE
 ____________________________________________________________________________
