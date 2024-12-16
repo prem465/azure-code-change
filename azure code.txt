@@ -3566,74 +3566,139 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-trigger: none # Manually triggered or configured in Release pipeline settings
+trigger: none  # Manually triggered after the build pipeline publishes artifacts
 
 pool:
   vmImage: 'windows-latest'
 
+parameters:
+  - name: UAT_WORKSPACE_NAME
+    displayName: "UAT Workspace Name"
+    type: string
+    default: 'YourUATWorkspaceName'
+
+  - name: UAT_ONELAKE_ENDPOINT
+    displayName: "UAT OneLake Endpoint"
+    type: string
+    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
+
 variables:
-  - group: powerbi
+  - group: powerbi  # Variable group with credentials
+  - name: UAT_WORKSPACE_NAME
+    value: '${{ parameters.UAT_WORKSPACE_NAME }}'
+  - name: UAT_ONELAKE_ENDPOINT
+    value: '${{ parameters.UAT_ONELAKE_ENDPOINT }}'
 
-jobs:
-  - deployment: Release
-    displayName: "Release Pipeline - Promote to UAT"
-    environment: 'UAT'
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-            - download: current
-              artifact: PowerBIArtifacts
-              displayName: 'Download Artifacts'
+stages:
+  - stage: Release
+    displayName: "Release to UAT Workspace"
+    jobs:
+      - deployment: DeployToUAT
+        displayName: "Deploy Artifacts to UAT Workspace"
+        environment: UAT
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                # Step 1: Download Build Artifacts
+                - task: DownloadBuildArtifacts@1
+                  displayName: 'Download Build Artifacts'
+                  inputs:
+                    buildType: 'current'
+                    downloadType: 'single'
+                    artifactName: 'PowerBIArtifacts'
+                    downloadPath: '$(System.DefaultWorkingDirectory)/artifacts'
 
-            - task: PowerShell@2
-              displayName: 'Promote Changes to UAT'
-              inputs:
-                pwsh: true
-                targetType: inline
-                script: |
-                  try {
-                      Write-Host "=== Connecting to Power BI Service ==="
-                      Import-Module Az.Accounts -Force
-                      Import-Module MicrosoftPowerBIMgmt -Force
-
+                # Step 2: Authenticate to Fabric, Power BI, and OneLake
+                - task: PowerShell@2
+                  displayName: '=== Authentication Setup ==='
+                  inputs:
+                    pwsh: true
+                    targetType: inline
+                    script: |
+                      Write-Host "=== Setting Up Credentials ==="
                       $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                       $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                       $tenantId = $env:TENANT_ID.Trim()
 
-                      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
-                      Write-Host "Authenticated to Power BI Service."
+                      Write-Host "=== Authenticating to Fabric ==="
+                      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
 
+                      # Authenticate with OneLake Endpoint
+                      $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+                      azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId `
+                          --trusted-microsoft-suffixes="${env:UAT_ONELAKE_ENDPOINT}" --output-type json
+
+                      Write-Host "=== Connecting to Power BI ==="
+                      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+                    env:
+                      CLIENT_SECRET: $(Clientsecret)
+                      CLIENT_ID: $(clinetid)
+                      TENANT_ID: $(tenantid)
+
+                # Step 3: Promote Artifacts (Semantic Models and Reports)
+                - task: PowerShell@2
+                  displayName: '=== Promoting Semantic Models and Reports ==='
+                  inputs:
+                    pwsh: true
+                    targetType: inline
+                    script: |
+                      Write-Host "=== Starting Promotion to UAT Workspace ==="
+
+                      # Retrieve UAT Workspace ID
                       $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
                       if (-not $workspaceObj) {
-                          Write-Error "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+                          Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
                           throw "Workspace not found."
                       }
                       $workspaceID = $workspaceObj.Id
+                      Write-Host "Workspace ID: $workspaceID"
 
-                      Write-Host "=== Promoting Semantic Models ==="
-                      $smPaths = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/SemanticModels" -Recurse
-                      foreach ($smPath in $smPaths) {
-                          Import-FabricItem -workspaceId $workspaceID -path $smPath.FullName
-                          Write-Host "Semantic model '$($smPath.FullName)' promoted successfully."
+                      function Import-SemanticModel($modelPath, $workspaceID) {
+                          Write-Host ("Importing semantic model from {0} into UAT workspace." -f $modelPath)
+                          $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelPath
+                          Write-Host "Semantic model imported successfully."
+                          return $smItem
                       }
 
-                      Write-Host "=== Promoting Reports ==="
-                      $rptPaths = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/Reports" -Recurse
-                      foreach ($rptPath in $rptPaths) {
-                          Import-FabricItem -workspaceId $workspaceID -path $rptPath.FullName
-                          Write-Host "Report '$($rptPath.FullName)' promoted successfully."
+                      # Process Semantic Models
+                      $smPath = "$(System.DefaultWorkingDirectory)/artifacts/SemanticModels"
+                      if (Test-Path $smPath) {
+                          Write-Host "=== Importing Semantic Models ==="
+                          Get-ChildItem -Path $smPath -Recurse -Filter "*.pbism" | ForEach-Object {
+                              Import-SemanticModel -modelPath $_.FullName -workspaceID $workspaceID
+                          }
+                      } else {
+                          Write-Host "No Semantic Models to Import."
                       }
 
-                      Write-Host "Promotion to UAT completed successfully."
-                  } catch {
-                      Write-Error ("An error occurred during the release: {0}" -f $_)
-                      throw $_
-                  }
-                env:
-                  CLIENT_SECRET: $(Clientsecret)
-                  CLIENT_ID: $(clinetid)
-                  TENANT_ID: $(tenantid)
-                  UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
-                  UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+                      # Process Reports
+                      $reportPath = "$(System.DefaultWorkingDirectory)/artifacts/Reports"
+                      if (Test-Path $reportPath) {
+                          Write-Host "=== Importing Reports ==="
+                          Get-ChildItem -Path $reportPath -Recurse -Filter "definition.pbir" | ForEach-Object {
+                              $reportFolder = $_.DirectoryName
+                              $reportDefinition = Get-Content $_.FullName | ConvertFrom-Json
+                              $semanticModelId = (Get-FabricItem -workspaceId $workspaceID -ItemType "SemanticModel").Id
 
+                              if (-not $semanticModelId) {
+                                  Write-Error "No Semantic Model found in the workspace for the report."
+                                  throw "Semantic Model Missing."
+                              }
+
+                              Write-Host "Importing report from $reportFolder with Semantic Model ID: $semanticModelId"
+                              Import-FabricItem -workspaceId $workspaceID -path $reportFolder `
+                                  -itemProperties @{ semanticModelId = $semanticModelId }
+                          }
+                      } else {
+                          Write-Host "No Reports to Import."
+                      }
+
+                      Write-Host "=== Promotion to UAT Workspace Completed Successfully ==="
+                    env:
+                      CLIENT_SECRET: $(Clientsecret)
+                      CLIENT_ID: $(clinetid)
+                      TENANT_ID: $(tenantid)
+                      UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+                      UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
