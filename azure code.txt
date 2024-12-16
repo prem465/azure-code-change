@@ -3604,7 +3604,7 @@ jobs:
                   Write-Host "=== Authenticating to Fabric ==="
                   $tenantId = $env:TENANT_ID.Trim()
                   $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-                    ([System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $(ConvertTo-SecureString -AsPlainText $env:CLIENT_SECRET -Force))).Password
+                    (ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force)
                   )
                   $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
 
@@ -3629,10 +3629,10 @@ jobs:
                     -TenantId $tenantId `
                     -Credential (New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, (ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force)))
 
-                env:
-                  CLIENT_ID: $(clinetid)
-                  CLIENT_SECRET: $(Clientsecret)
-                  TENANT_ID: $(tenantid)
+              env:
+                CLIENT_ID: $(clinetid)
+                CLIENT_SECRET: $(Clientsecret)
+                TENANT_ID: $(tenantid)
 
             # Step 3: Promote Artifacts to UAT
             - task: PowerShell@2
@@ -3678,8 +3678,8 @@ jobs:
 
                   Write-Host "All artifacts promoted successfully to UAT."
 
-                env:
-                  UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+              env:
+                UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
 
             # Step 4: Final Log Message
             - task: PowerShell@2
