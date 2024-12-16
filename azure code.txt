@@ -1,28 +1,4 @@
-trigger:
-  branches:
-    include:
-      - develop
 
-pool:
-  vmImage: 'windows-latest'
-
-variables:
-  group: powerbi # Ensure this variable group contains clientid, clientsecret, and tenantid
-  SOURCE_WORKSPACE_ID: "c017440f-4a5b-46bd-a2c0-93ee3f04ab4d"
-  TARGET_WORKSPACE_ID: "a4628c7b-adda-4285-8c1f-758b19162d0b"
-  MODULE_LIST: |
-    MicrosoftPowerBIMgmt
-    Invoke-DQVTesting
-    Invoke-SemanticModelRefresh
-
-steps:
-# Step 1: Checkout Repository
-- checkout: self
-  displayName: 'Checkout Repository'
-- task: PowerShell@2
-  displayName: 'Setup PowerShell Environment'
-  inputs:
-    pwsh: true
     targetType: inline
     script: |
       [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -3511,3 +3487,148 @@ jobs:
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
           DEV_ONELAKE_ENDPOINT: $(DEV_ONELAKE_ENDPOINT)
           UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+--------------------------------------------------------------------
+BUILD
+____________________________________________________________________
+trigger:
+  branches:
+    include:
+      - develop
+
+pool:
+  vmImage: 'windows-latest'
+
+jobs:
+  - job: Build
+    displayName: "Build Pipeline - Detect Changes and Publish Artifacts"
+    steps:
+      - checkout: self
+        fetchDepth: 0
+        displayName: 'Checkout Repository'
+
+      - task: PowerShell@2
+        displayName: 'Detect Changes and Publish Artifacts'
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            Write-Host "=== Detecting Changes ==="
+            $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+            $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+            $pbipSMChanges = $pbipSMChanges | Sort-Object -Unique
+            $pbipRptChanges = $pbipRptChanges | Sort-Object -Unique
+
+            if ($pbipSMChanges.Count -eq 0 -and $pbipRptChanges.Count -eq 0) {
+                Write-Host "No changes detected. Exiting build pipeline."
+                exit 0
+            }
+
+            Write-Host "=== Archiving Artifacts ==="
+            $artifactsPath = "$(System.DefaultWorkingDirectory)/artifacts"
+            New-Item -ItemType Directory -Force -Path $artifactsPath
+
+            if ($pbipSMChanges.Count -gt 0) {
+                Write-Host "Archiving Semantic Model Changes"
+                $pbipSMChanges | ForEach-Object {
+                    $sourcePath = Join-Path -Path "$(System.DefaultWorkingDirectory)" -ChildPath $_
+                    $destinationPath = Join-Path -Path $artifactsPath -ChildPath "SemanticModels"
+                    Copy-Item -Path $sourcePath -Destination $destinationPath -Recurse -Force
+                }
+            }
+
+            if ($pbipRptChanges.Count -gt 0) {
+                Write-Host "Archiving Report Changes"
+                $pbipRptChanges | ForEach-Object {
+                    $sourcePath = Join-Path -Path "$(System.DefaultWorkingDirectory)" -ChildPath $_
+                    $destinationPath = Join-Path -Path $artifactsPath -ChildPath "Reports"
+                    Copy-Item -Path $sourcePath -Destination $destinationPath -Recurse -Force
+                }
+            }
+
+            Write-Host "Artifacts archived successfully."
+        env:
+          CLIENT_SECRET: $(Clientsecret)
+          CLIENT_ID: $(clinetid)
+          TENANT_ID: $(tenantid)
+
+      - task: PublishBuildArtifacts@1
+        displayName: 'Publish Artifacts'
+        inputs:
+          PathtoPublish: '$(System.DefaultWorkingDirectory)/artifacts'
+          ArtifactName: 'PowerBIArtifacts'
+-----------------------------------------------------------------------------
+RELEASE
+____________________________________________________________________________
+
+trigger: none # Manually triggered or configured in Release pipeline settings
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: powerbi
+
+jobs:
+  - deployment: Release
+    displayName: "Release Pipeline - Promote to UAT"
+    environment: 'UAT'
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+            - download: current
+              artifact: PowerBIArtifacts
+              displayName: 'Download Artifacts'
+
+            - task: PowerShell@2
+              displayName: 'Promote Changes to UAT'
+              inputs:
+                pwsh: true
+                targetType: inline
+                script: |
+                  try {
+                      Write-Host "=== Connecting to Power BI Service ==="
+                      Import-Module Az.Accounts -Force
+                      Import-Module MicrosoftPowerBIMgmt -Force
+
+                      $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+                      $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+                      $tenantId = $env:TENANT_ID.Trim()
+
+                      Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+                      Write-Host "Authenticated to Power BI Service."
+
+                      $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+                      if (-not $workspaceObj) {
+                          Write-Error "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+                          throw "Workspace not found."
+                      }
+                      $workspaceID = $workspaceObj.Id
+
+                      Write-Host "=== Promoting Semantic Models ==="
+                      $smPaths = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/SemanticModels" -Recurse
+                      foreach ($smPath in $smPaths) {
+                          Import-FabricItem -workspaceId $workspaceID -path $smPath.FullName
+                          Write-Host "Semantic model '$($smPath.FullName)' promoted successfully."
+                      }
+
+                      Write-Host "=== Promoting Reports ==="
+                      $rptPaths = Get-ChildItem -Path "$(Pipeline.Workspace)/PowerBIArtifacts/Reports" -Recurse
+                      foreach ($rptPath in $rptPaths) {
+                          Import-FabricItem -workspaceId $workspaceID -path $rptPath.FullName
+                          Write-Host "Report '$($rptPath.FullName)' promoted successfully."
+                      }
+
+                      Write-Host "Promotion to UAT completed successfully."
+                  } catch {
+                      Write-Error ("An error occurred during the release: {0}" -f $_)
+                      throw $_
+                  }
+                env:
+                  CLIENT_SECRET: $(Clientsecret)
+                  CLIENT_ID: $(clinetid)
+                  TENANT_ID: $(tenantid)
+                  UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+                  UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
