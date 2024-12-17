@@ -3567,11 +3567,24 @@ RELEASE
 ____________________________________________________________________________
 
 ###############################################################################
-# Release Pipeline that consumes artifacts from the Build Pipeline
+# RELEASE PIPELINE that auto-triggers after the Build/CI pipeline named "Power-BI-(CI)" completes
 ###############################################################################
 
-trigger: none  # Usually triggered by the build or manually
+# We don't need a direct branch trigger here since we're using pipeline resources.
+trigger: none
 
+# Define a pipeline resource referencing your CI pipeline by name: Power-BI-(CI).
+resources:
+  pipelines:
+    - pipeline: ciPipelineResource               # Arbitrary alias used in the 'DownloadPipelineArtifact' step
+      source: Power-BI-(CI)                      # EXACT name of your Build pipeline
+      # If your CI pipeline is in another project or different org, specify additional keys (project, organization).
+      trigger:
+        branches:
+          include:
+            - develop                            # Or whichever branches should trigger CD once CI completes
+
+# Parameter definitions (same as before)
 parameters:
   - name: DEV_WORKSPACE_NAME
     displayName: "Development Workspace Name"
@@ -3596,8 +3609,10 @@ parameters:
 pool:
   vmImage: 'windows-latest'
 
+# Reference your variable group if desired. Example: 'powerbi'
 variables:
-  - group: 'powerbi'   # <-- Same variable group
+  - group: 'powerbi'  # Must contain: tenantid (GUID), clinetid (SP App ID), clientsecret, etc.
+
   - name: DEV_WORKSPACE_NAME
     value: ${{ parameters.DEV_WORKSPACE_NAME }}
   - name: UAT_WORKSPACE_NAME
@@ -3609,20 +3624,18 @@ variables:
 
 jobs:
   - job: Release
-    displayName: "Release Pipeline - Promote to UAT"
+    displayName: "CD Pipeline - Promote to UAT"
 
     steps:
-      - checkout: none  # We only need the artifact
+      - checkout: none  # We only need the artifact from the build pipeline, no source code checkout
 
-      - task: DownloadBuildArtifacts@0
-        displayName: "Download Build Artifacts"
+      # Download the artifact published by the "Power-BI-(CI)" pipeline
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download Artifacts from Power-BI-(CI)"
         inputs:
-          buildType: 'specific' 
-          project: '$(System.TeamProjectId)'
-          definition: '<BuildPipelineDefinitionID>'  # Replace with your Build pipeline ID or name
-          buildVersionToDownload: 'latest'
-          artifactName: 'PowerBIArtifacts'
-          downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
+          pipeline: ciPipelineResource     # Matches the alias defined under resources.pipelines
+          artifact: PowerBIArtifacts       # The artifact name published by your CI pipeline's PublishBuildArtifacts
+          path: "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
 
       # Step 1: Install Required Modules
       - task: PowerShell@2
@@ -3658,7 +3671,7 @@ jobs:
             
             Write-Host "Dependencies installed successfully."
 
-      # Step 2: Promote Artifacts to UAT
+      # Step 2: Promote Artifacts (SemanticModels & Reports) to UAT
       - task: PowerShell@2
         displayName: '=== Promoting Changes to UAT ==='
         inputs:
@@ -3666,18 +3679,17 @@ jobs:
           targetType: inline
           script: |
             try {
-                # Import modules
                 Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
 
-                # Use the environment variables from the variable group
-                $secret   = $env:clientsecret  | ConvertTo-SecureString -AsPlainText -Force
+                # Load environment variables from variable group
+                $secret = $env:clientsecret | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:clinetid, $secret)
                 $tenantId = $env:tenantid.Trim()
 
                 if (!$tenantId -or $tenantId -eq "" -or $tenantId -eq "00000000-0000-0000-0000-000000000000") {
-                    Write-Error "Invalid or missing tenant ID. Make sure 'tenantid' is set to the correct GUID in your variable group."
+                    Write-Error "Invalid or missing tenant ID. Make sure 'tenantid' is the correct GUID in your variable group."
                     throw "Tenant ID not valid."
                 }
 
@@ -3703,7 +3715,6 @@ jobs:
                   throw "Fabric authentication failed."
                 }
 
-                # For Az.Account
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
 
                 Write-Host "=== Authenticating to OneLake with AzCopy ==="
@@ -3723,7 +3734,7 @@ jobs:
                   Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
                 }
 
-                # Locate artifacts
+                # Locate artifacts from the downloaded pipeline resource
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
                 if (!(Test-Path $artifactRoot)) {
                   Write-Error "PowerBIArtifacts folder not found. Exiting."
@@ -3732,8 +3743,8 @@ jobs:
 
                 # Check for placeholder
                 $placeholderExists = Test-Path (Join-Path $artifactRoot "NoChanges.txt")
-                $pbismFiles        = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbism -ErrorAction SilentlyContinue
-                $pbirFiles         = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbir -ErrorAction SilentlyContinue
+                $pbismFiles = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbism -ErrorAction SilentlyContinue
+                $pbirFiles  = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbir -ErrorAction SilentlyContinue
 
                 if ($placeholderExists -and (!$pbismFiles -and !$pbirFiles)) {
                     Write-Host "No actual changes to promote (only placeholder). Exiting."
@@ -3760,7 +3771,7 @@ jobs:
                     }
                 }
 
-                # Import semantic models
+                # Import .pbism files
                 if ($pbismFiles) {
                     Write-Host "=== Importing Semantic Models ==="
                     $distinctModelFolders = $pbismFiles | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
@@ -3771,7 +3782,7 @@ jobs:
                     Write-Host "No semantic models found to import."
                 }
 
-                # Import reports
+                # Import .pbir files
                 if ($pbirFiles) {
                     Write-Host "=== Importing Reports ==="
                     $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
