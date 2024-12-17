@@ -3571,11 +3571,11 @@ trigger: none
 resources:
   pipelines:
     - pipeline: ciPipelineAlias
-      source: 'Power-BI-(CI)'
+      source: 'Power-BI-(CI)'  # EXACT name of your CI pipeline
       trigger:
         branches:
           include:
-            - develop
+            - develop          # Auto-trigger on develop branch from CI
 
 parameters:
   - name: DEV_WORKSPACE_NAME
@@ -3598,7 +3598,8 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  - group: 'powerbi'  # Contains tenantid (GUID), clinetid (SP ID), clientsecret
+  - group: 'powerbi'  # Contains tenantid (GUID), clinetid (GUID), clientsecret
+
   - name: DEV_WORKSPACE_NAME
     value: ${{ parameters.DEV_WORKSPACE_NAME }}
   - name: UAT_WORKSPACE_NAME
@@ -3619,7 +3620,7 @@ jobs:
         inputs:
           buildType: 'specific'
           project: '$(System.TeamProjectId)'
-          definition: 'Power-BI-(CI)'
+          definition: 'Power-BI-(CI)'          # EXACT name of your CI pipeline
           buildVersionToDownload: 'latest'
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
@@ -3662,23 +3663,24 @@ jobs:
           targetType: inline
           script: |
             try {
+                # Import modules
                 Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
 
+                # Credentials
                 $secret = $env:clientsecret | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:clinetid, $secret)
                 $tenantId = $env:tenantid.Trim()
 
                 Write-Host "=== Authenticating to Fabric ==="
-                $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
-                $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+                    [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+                )
 
+                # Check if service principal
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-                $isServicePrincipal = $false
-                if ($credential.UserName -match $guidRegex) {
-                  $isServicePrincipal = $true
-                }
+                $isServicePrincipal = ($credential.UserName -match $guidRegex)
 
                 if ($isServicePrincipal) {
                   Set-FabricAuthToken -servicePrincipalId $credential.UserName -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
@@ -3699,8 +3701,7 @@ jobs:
                 $oneLakeUri = [System.Uri]::new("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
                 $oneLakeDomain = $oneLakeUri.Host
                 $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
-                $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
-                if (!$checkResult) {
+                if (-not ($loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." })) {
                   Write-Error "AzCopy authentication failed."
                   throw "AzCopy login failed."
                 }
@@ -3712,21 +3713,21 @@ jobs:
                   Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
                 }
 
-                Write-Host "=== Checking Artifacts ==="
+                # Locate artifacts
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
                 if (!(Test-Path $artifactRoot)) {
-                    Write-Host "No artifacts found; nothing to promote. Exiting."
-                    exit 0
+                  Write-Error "PowerBIArtifacts folder not found. Exiting."
+                  throw "No artifacts folder found."
                 }
 
+                # Identify PBISM/PBIR files
                 $pbismFiles = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbism -ErrorAction SilentlyContinue
                 $pbirFiles  = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbir -ErrorAction SilentlyContinue
 
+                # Check placeholder
                 $placeholderFile = Join-Path $artifactRoot "NoChanges.txt"
-                $placeholderExists = Test-Path $placeholderFile
-
-                if ($placeholderExists -and (!$pbismFiles -and !$pbirFiles)) {
-                    Write-Host "No actual changes to promote (only placeholder). Exiting."
+                if (Test-Path $placeholderFile -and (!$pbismFiles -and !$pbirFiles)) {
+                    Write-Host "No actual changes to promote (placeholder only). Exiting."
                     exit 0
                 }
 
@@ -3741,10 +3742,9 @@ jobs:
                 function Import-SemanticModel($modelFolder, $workspaceID) {
                     Write-Host ("Importing semantic model from {0} into UAT workspace." -f $modelFolder)
                     if (!(Test-Path $modelFolder)) {
-                        Write-Error "Semantic model folder '$modelFolder' does not exist."
+                        Write-Error ("Semantic model folder '{0}' does not exist." -f $modelFolder)
                         throw "Semantic model path not found."
                     }
-
                     try {
                         $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolder
                         Write-Host "Semantic model imported successfully."
@@ -3755,62 +3755,59 @@ jobs:
                     }
                 }
 
-                # Import semantic models
+                # 1) Import semantic models if any
                 if ($pbismFiles) {
-                    Write-Host "=== Importing Semantic Models ==="
-                    $distinctModelFolders = $pbismFiles | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
-                    foreach ($folder in $distinctModelFolders) {
+                    Write-Host "=== Importing Changed Semantic Models ==="
+                    $distinctFolders = $pbismFiles | ForEach-Object { $_.DirectoryName } | Sort-Object -Unique
+                    foreach ($folder in $distinctFolders) {
                         Import-SemanticModel $folder $workspaceID | Out-Null
                     }
+                } else {
+                    Write-Host "No .pbism changes found."
                 }
 
-                # If no reports changed, exit
-                if (-not $pbirFiles) {
-                    Write-Host "No report changes detected. All requested semantic models are updated."
-                    Write-Host "Pipeline completed successfully."
+                # 2) Import reports if any
+                if (!$pbirFiles) {
+                    Write-Host "No .pbir changes found. Pipeline completed successfully."
                     exit 0
                 }
 
                 Write-Host "=== Importing Changed Reports ==="
-                $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
-
                 foreach ($rptFile in $pbirFiles) {
                     $parentFolder = $rptFile.DirectoryName
                     $defFile = Join-Path $parentFolder "definition.pbir"
                     if (!(Test-Path $defFile)) {
-                        Write-Error ("Report definition.pbir not found in {0}" -f $parentFolder)
+                        Write-Error ("definition.pbir not found in '{0}'." -f $parentFolder)
                         throw "Report definition not found."
                     }
 
-                    $reportDefinition = Get-Content $defFile | ConvertFrom-Json
-                    $semanticModelRef = $reportDefinition.datasetReference.byPath
-
+                    $definition = Get-Content $defFile | ConvertFrom-Json
+                    $semanticModelRef = $definition.datasetReference.byPath
                     if (-not $semanticModelRef) {
-                        Write-Error "Report definition does not specify datasetReference.byPath."
-                        throw "No semantic model path for the report."
+                        Write-Error "datasetReference.byPath not specified in definition.pbir."
+                        throw "Semantic model reference missing."
                     }
 
-                    # Clean up semantic model path if it includes extra folders
-                    # Remove any leading slash or 'PowerBIArtifacts' references
-                    $cleanedPath = $semanticModelRef.path -replace "^(.*PowerBIArtifacts[\\/])",""
-                    $smFolderPath = Join-Path $parentFolder $cleanedPath
+                    # We'll attempt two standard approaches:
+                    # A) Relative to artifact root
+                    # B) Relative to the report folder
+                    $pathA = Join-Path $artifactRoot $semanticModelRef.path
+                    $pathB = Join-Path $parentFolder $semanticModelRef.path
 
-                    if (!(Test-Path $smFolderPath)) {
-                        Write-Host "The semantic model path '$smFolderPath' does not exist. Attempting relative adjustments."
-                        # If this fails, it means the definition might have included an absolute or incorrect path.
-                        # Try one level up (in case definition was at a deeper level)
-                        $alternativePath = Join-Path $artifactRoot $cleanedPath
-                        if (Test-Path $alternativePath) {
-                            $smFolderPath = $alternativePath
-                        } else {
-                            Write-Error "Semantic model path '$smFolderPath' not found. Also checked '$alternativePath'."
-                            throw "Semantic model path not found."
-                        }
+                    $finalSMFolder = $null
+                    if (Test-Path $pathA) {
+                        $finalSMFolder = $pathA
+                    } elseif (Test-Path $pathB) {
+                        $finalSMFolder = $pathB
+                    } else {
+                        Write-Error "Semantic model path not found at either '$pathA' or '$pathB'."
+                        throw "Semantic model path not found."
                     }
 
-                    $pbismFile = Get-ChildItem -Path $smFolderPath -Recurse -Include "*.pbism"
+                    # Locate the actual .pbism file
+                    $pbismFile = Get-ChildItem -Path $finalSMFolder -Recurse -Include "*.pbism" -ErrorAction SilentlyContinue
                     if (-not $pbismFile) {
-                        Write-Error "No .pbism file found for the report's semantic model at '$smFolderPath'."
+                        Write-Error "No .pbism file found for the report's semantic model under '$finalSMFolder'."
                         throw "Semantic model .pbism not found."
                     }
 
@@ -3818,7 +3815,7 @@ jobs:
                     $reImportedSM = Import-SemanticModel $pbismFile.DirectoryName $workspaceID
                     $semanticModelId = $reImportedSM.id
 
-                    Write-Host ("Importing report at {0} to UAT workspace with semantic model ID: {1}" -f $parentFolder, $semanticModelId)
+                    Write-Host ("Importing report at {0} with semantic model ID: {1}" -f $parentFolder, $semanticModelId)
                     try {
                         Import-FabricItem -workspaceId $workspaceID -path $parentFolder -itemProperties @{ semanticModelId = $semanticModelId } | Out-Null
                         Write-Host "Report imported successfully."
@@ -3835,4 +3832,3 @@ jobs:
                 Write-Error ("An error occurred: {0}" -f $_)
                 throw $_
             }
-
