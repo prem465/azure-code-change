@@ -3566,43 +3566,31 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-###############################################################################
-# Release (CD) Pipeline
-# Auto-triggers once the "Power-BI-(CI)" pipeline completes successfully.
-###############################################################################
+trigger: none
 
-trigger: none  # No direct branch trigger; we rely on the pipeline resource trigger.
-
-# Pipeline resource references the CI pipeline by name ("Power-BI-(CI)").
-# 'trigger: true' means this CD pipeline automatically starts whenever
-# "Power-BI-(CI)" publishes a new build/artifact from the specified branch(es).
 resources:
   pipelines:
-    - pipeline: ciPipelineAlias            # Arbitrary alias
-      source: 'Power-BI-(CI)'             # EXACT name of your CI pipeline
+    - pipeline: ciPipelineAlias
+      source: 'Power-BI-(CI)'
       trigger:
         branches:
           include:
-            - develop                     # Auto-trigger when CI completes on 'develop'
+            - develop
 
 parameters:
   - name: DEV_WORKSPACE_NAME
-    displayName: "Development Workspace Name"
     type: string
     default: 'YourDevWorkspaceName'
 
   - name: UAT_WORKSPACE_NAME
-    displayName: "UAT Workspace Name"
     type: string
     default: 'YourUATWorkspaceName'
 
   - name: DEV_ONELAKE_ENDPOINT
-    displayName: "Dev OneLake Endpoint"
     type: string
     default: 'https://dev-onelakeendpoint.fabric.microsoft.com'
 
   - name: UAT_ONELAKE_ENDPOINT
-    displayName: "UAT OneLake Endpoint"
     type: string
     default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
 
@@ -3610,9 +3598,7 @@ pool:
   vmImage: 'windows-latest'
 
 variables:
-  # Same variable group as your CI pipeline
-  - group: 'powerbi'  # Must contain tenantid (GUID), clinetid (GUID), clientsecret, etc.
-
+  - group: 'powerbi'  # Contains tenantid (GUID), clinetid (SP ID), clientsecret
   - name: DEV_WORKSPACE_NAME
     value: ${{ parameters.DEV_WORKSPACE_NAME }}
   - name: UAT_WORKSPACE_NAME
@@ -3625,22 +3611,19 @@ variables:
 jobs:
   - job: Release
     displayName: "Automated Deployment and Promotion Job"
-
     steps:
-      - checkout: none  # We only need the artifact, no source code checkout
+      - checkout: none
 
-      # Same DownloadBuildArtifacts step that was working before
       - task: DownloadBuildArtifacts@0
         displayName: "Download Build Artifacts"
         inputs:
           buildType: 'specific'
           project: '$(System.TeamProjectId)'
-          definition: 'Power-BI-(CI)'    # EXACT name of your CI pipeline
+          definition: 'Power-BI-(CI)'
           buildVersionToDownload: 'latest'
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
-      # Step 1: Install Required Modules
       - task: PowerShell@2
         displayName: '=== Installing Dependencies ==='
         inputs:
@@ -3679,12 +3662,10 @@ jobs:
           targetType: inline
           script: |
             try {
-                # Import modules
                 Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
 
-                # Credentials setup
                 $secret = $env:clientsecret | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:clinetid, $secret)
                 $tenantId = $env:tenantid.Trim()
@@ -3692,8 +3673,7 @@ jobs:
                 Write-Host "=== Authenticating to Fabric ==="
                 $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
                 $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
-                
-                # Determine if service principal
+
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
                 $isServicePrincipal = $false
                 if ($credential.UserName -match $guidRegex) {
@@ -3701,9 +3681,7 @@ jobs:
                 }
 
                 if ($isServicePrincipal) {
-                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-                    -servicePrincipalSecret $plainTextPwd `
-                    -tenantId $tenantId -reset
+                  Set-FabricAuthToken -servicePrincipalId $credential.UserName -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
                 } else {
                   Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
                 }
@@ -3718,7 +3696,7 @@ jobs:
 
                 Write-Host "=== Authenticating to OneLake with AzCopy ==="
                 $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-                $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+                $oneLakeUri = [System.Uri]::new("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
                 $oneLakeDomain = $oneLakeUri.Host
                 $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
                 $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
@@ -3741,15 +3719,13 @@ jobs:
                     exit 0
                 }
 
-                # Identify changed PBISM/PBIR files
                 $pbismFiles = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbism -ErrorAction SilentlyContinue
                 $pbirFiles  = Get-ChildItem -Path $artifactRoot -Recurse -Include *.pbir -ErrorAction SilentlyContinue
 
-                # Check for placeholder
                 $placeholderFile = Join-Path $artifactRoot "NoChanges.txt"
                 $placeholderExists = Test-Path $placeholderFile
 
-                if ($placeholderExists -and (!$pbismFiles -and -not $pbirFiles)) {
+                if ($placeholderExists -and (!$pbismFiles -and !$pbirFiles)) {
                     Write-Host "No actual changes to promote (only placeholder). Exiting."
                     exit 0
                 }
@@ -3764,6 +3740,11 @@ jobs:
 
                 function Import-SemanticModel($modelFolder, $workspaceID) {
                     Write-Host ("Importing semantic model from {0} into UAT workspace." -f $modelFolder)
+                    if (!(Test-Path $modelFolder)) {
+                        Write-Error "Semantic model folder '$modelFolder' does not exist."
+                        throw "Semantic model path not found."
+                    }
+
                     try {
                         $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolder
                         Write-Host "Semantic model imported successfully."
@@ -3783,16 +3764,16 @@ jobs:
                     }
                 }
 
-                # If no reports changed, we exit
+                # If no reports changed, exit
                 if (-not $pbirFiles) {
                     Write-Host "No report changes detected. All requested semantic models are updated."
                     Write-Host "Pipeline completed successfully."
                     exit 0
                 }
 
-                # Import reports
                 Write-Host "=== Importing Changed Reports ==="
                 $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
                 foreach ($rptFile in $pbirFiles) {
                     $parentFolder = $rptFile.DirectoryName
                     $defFile = Join-Path $parentFolder "definition.pbir"
@@ -3803,15 +3784,33 @@ jobs:
 
                     $reportDefinition = Get-Content $defFile | ConvertFrom-Json
                     $semanticModelRef = $reportDefinition.datasetReference.byPath
+
                     if (-not $semanticModelRef) {
                         Write-Error "Report definition does not specify datasetReference.byPath."
                         throw "No semantic model path for the report."
                     }
 
-                    $smFolderPath = Join-Path $parentFolder $semanticModelRef.path
+                    # Clean up semantic model path if it includes extra folders
+                    # Remove any leading slash or 'PowerBIArtifacts' references
+                    $cleanedPath = $semanticModelRef.path -replace "^(.*PowerBIArtifacts[\\/])",""
+                    $smFolderPath = Join-Path $parentFolder $cleanedPath
+
+                    if (!(Test-Path $smFolderPath)) {
+                        Write-Host "The semantic model path '$smFolderPath' does not exist. Attempting relative adjustments."
+                        # If this fails, it means the definition might have included an absolute or incorrect path.
+                        # Try one level up (in case definition was at a deeper level)
+                        $alternativePath = Join-Path $artifactRoot $cleanedPath
+                        if (Test-Path $alternativePath) {
+                            $smFolderPath = $alternativePath
+                        } else {
+                            Write-Error "Semantic model path '$smFolderPath' not found. Also checked '$alternativePath'."
+                            throw "Semantic model path not found."
+                        }
+                    }
+
                     $pbismFile = Get-ChildItem -Path $smFolderPath -Recurse -Include "*.pbism"
                     if (-not $pbismFile) {
-                        Write-Error "No .pbism file found for the report's semantic model."
+                        Write-Error "No .pbism file found for the report's semantic model at '$smFolderPath'."
                         throw "Semantic model .pbism not found."
                     }
 
@@ -3836,3 +3835,4 @@ jobs:
                 Write-Error ("An error occurred: {0}" -f $_)
                 throw $_
             }
+
