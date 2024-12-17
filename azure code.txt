@@ -3566,126 +3566,141 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-trigger:
-  branches:
-    include:
-      - develop
+trigger: none  # Release pipeline will trigger after the build pipeline is successful.
 
-pool:
-  vmImage: 'windows-latest'
+stages:
+  - stage: Release
+    displayName: "Release to UAT"
+    dependsOn: []  # Explicitly depends on Build pipeline
+    condition: succeeded()
+    jobs:
+      - deployment: DeployToUAT
+        displayName: "Deploy Files and Models to UAT"
+        environment: "UAT"
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none  # Artifacts are used, no repo checkout here
 
-variables:
-  - group: powerbi
-  - name: UAT_WORKSPACE_NAME
-    value: 'YourUATWorkspaceName'  # Replace with actual UAT workspace name
-  - name: UAT_ONELAKE_ENDPOINT
-    value: 'https://uat-onelakeendpoint.fabric.microsoft.com'  # Replace with actual UAT OneLake endpoint
+                # Step 1: Download Build Artifacts
+                - task: DownloadPipelineArtifact@2
+                  displayName: "Download Build Artifacts"
+                  inputs:
+                    buildType: 'current'
+                    artifactName: 'drop'
+                    targetPath: '$(System.ArtifactsDirectory)/artifacts'
 
-jobs:
-  - deployment: ReleasePipeline
-    displayName: "Release Pipeline - Promote Artifacts"
-    environment: UAT
-    strategy:
-      runOnce:
-        deploy:
-          steps:
-            # Step 1: Checkout Repository
-            - checkout: self
-              fetchDepth: 0
-              displayName: '=== Checkout Repository ==='
+                # Step 2: Install Dependencies
+                - task: PowerShell@2
+                  displayName: "Install Dependencies"
+                  inputs:
+                    pwsh: true
+                    targetType: inline
+                    script: |
+                      Write-Host "=== Installing Required Modules ==="
+                      Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
+                      Install-Module -Name Az.Accounts -Scope CurrentUser -Force -AllowClobber
+                      Import-Module MicrosoftPowerBIMgmt -Force
+                      Import-Module Az.Accounts -Force
+                      Write-Host "Modules installed successfully."
 
-            # Step 2: Authenticate to Fabric and Azure
-            - task: PowerShell@2
-              displayName: '=== Authenticate to Fabric and Azure ==='
-              inputs:
-                pwsh: true
-                targetType: inline
-                script: |
-                  Write-Host "=== Authenticating to Fabric ==="
-                  $tenantId = $env:TENANT_ID.Trim()
-                  $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR(
-                    (ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force)
-                  )
-                  $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+                # Step 3: Authenticate to Fabric and Power BI
+                - task: PowerShell@2
+                  displayName: "Authenticate to Fabric and Power BI"
+                  inputs:
+                    pwsh: true
+                    targetType: inline
+                    script: |
+                      Write-Host "=== Authenticating ==="
+                      $tenantId = $env:TENANT_ID.Trim()
+                      $clientSecret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+                      $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $clientSecret)
 
-                  # Authenticate with Fabric
-                  Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID `
-                    -servicePrincipalSecret $plainTextPwd `
-                    -tenantId $tenantId -reset
+                      # Authenticate
+                      Connect-PowerBIServiceAccount -ServicePrincipal -TenantId $tenantId -Credential $credential -ErrorAction Stop
+                      Write-Host "Authenticated successfully to Power BI."
 
-                  # Authenticate with OneLake Endpoint
-                  Write-Host "=== Authenticating to OneLake Endpoint ==="
-                  $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-                  $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
-                  azcopy login --service-principal `
-                    --application-id $env:CLIENT_ID `
-                    --tenant-id $tenantId `
-                    --trusted-microsoft-suffixes $oneLakeUri.Host `
-                    --output-type json
+                # Step 4: Deploy Semantic Models and Reports
+                - task: PowerShell@2
+                  displayName: "Deploy Reports and Semantic Models to UAT"
+                  inputs:
+                    pwsh: true
+                    targetType: inline
+                    script: |
+                      Write-Host "=== Starting Deployment to UAT ==="
 
-                  # Connect to Power BI Service
-                  Write-Host "=== Connecting to Power BI Service ==="
-                  Connect-PowerBIServiceAccount -ServicePrincipal `
-                    -TenantId $tenantId `
-                    -Credential (New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, (ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force)))
-
-              env:
-                CLIENT_ID: $(clinetid)
-                CLIENT_SECRET: $(Clientsecret)
-                TENANT_ID: $(tenantid)
-
-            # Step 3: Promote Artifacts to UAT
-            - task: PowerShell@2
-              displayName: '=== Promote Artifacts (Semantic Models and Reports) ==='
-              inputs:
-                pwsh: true
-                targetType: inline
-                script: |
-                  Write-Host "=== Promoting Semantic Models and Reports ==="
-
-                  # Workspace retrieval
-                  $workspaceName = "$($env:UAT_WORKSPACE_NAME)"
-                  Write-Host "Retrieving UAT workspace: $workspaceName"
-                  $workspaceObj = Get-FabricWorkspace -workspaceName $workspaceName
-                  if (-not $workspaceObj) {
-                      Write-Error "UAT workspace '$workspaceName' not found."
-                      throw "Workspace not found."
-                  }
-                  $workspaceID = $workspaceObj.Id
-                  Write-Host "UAT Workspace ID: $workspaceID"
-
-                  # Import Semantic Models if changed
-                  $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
-                  if ($pbipSMChanges.Count -gt 0) {
-                      Write-Host "=== Importing Changed Semantic Models ==="
-                      foreach ($change in $pbipSMChanges) {
-                          $path = (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
-                          Write-Host "Importing Semantic Model: $path"
-                          Import-FabricItem -workspaceId $workspaceID -path $path
+                      # Functions
+                      function Import-SemanticModel {
+                          param([string]$modelPath, [string]$workspaceId)
+                          Write-Host "Importing semantic model: $modelPath"
+                          try {
+                              $smItem = Import-FabricItem -workspaceId $workspaceId -path $modelPath
+                              Write-Host "Semantic model imported successfully."
+                              return $smItem
+                          } catch {
+                              Write-Error "Failed to import semantic model at $modelPath. Error: $_"
+                              throw $_
+                          }
                       }
-                  }
 
-                  # Import Reports if changed
-                  $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
-                  if ($pbipRptChanges.Count -gt 0) {
-                      Write-Host "=== Importing Changed Reports ==="
-                      foreach ($change in $pbipRptChanges) {
-                          $path = (Join-Path -Path $env:BUILD_SOURCESDIRECTORY -ChildPath $change)
-                          Write-Host "Importing Report: $path"
-                          Import-FabricItem -workspaceId $workspaceID -path $path
+                      function Import-Report {
+                          param([string]$reportPath, [string]$semanticModelId, [string]$workspaceId)
+                          Write-Host "Importing report at $reportPath with Semantic Model ID: $semanticModelId"
+                          try {
+                              Import-FabricItem -workspaceId $workspaceId -path $reportPath -itemProperties @{ semanticModelId = $semanticModelId }
+                              Write-Host "Report imported successfully."
+                          } catch {
+                              Write-Error "Failed to import report. Error: $_"
+                              throw $_
+                          }
                       }
-                  }
 
-                  Write-Host "All artifacts promoted successfully to UAT."
+                      # Variables
+                      $workspaceName = "${env:UAT_WORKSPACE_NAME}"
+                      $workspace = Get-FabricWorkspace -workspaceName $workspaceName
+                      if (-not $workspace) {
+                          Write-Error "UAT workspace '$workspaceName' not found."
+                          throw "Workspace not found."
+                      }
+                      $workspaceId = $workspace.Id
 
-              env:
-                UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+                      # Artifacts Path
+                      $artifactsPath = "$(System.ArtifactsDirectory)/artifacts"
+                      $semanticModelFiles = Get-ChildItem -Path $artifactsPath -Recurse -Include "*.pbism"
+                      $reportFiles = Get-ChildItem -Path $artifactsPath -Recurse -Include "*.pbir"
 
-            # Step 4: Final Log Message
-            - task: PowerShell@2
-              displayName: '=== Final Verification ==='
-              inputs:
-                pwsh: true
-                targetType: inline
-                script: |
-                  Write-Host "=== Release Pipeline Execution Completed Successfully ==="
+                      # Deploy Semantic Models
+                      if ($semanticModelFiles) {
+                          Write-Host "=== Deploying Semantic Models ==="
+                          foreach ($file in $semanticModelFiles) {
+                              Import-SemanticModel -modelPath $file.FullName -workspaceId $workspaceId
+                          }
+                      } else {
+                          Write-Host "No semantic model changes detected."
+                      }
+
+                      # Deploy Reports
+                      if ($reportFiles) {
+                          Write-Host "=== Deploying Reports ==="
+                          foreach ($report in $reportFiles) {
+                              # Find the semantic model
+                              $semanticModelName = "YourSemanticModelName" # Add logic to detect semantic model here
+                              $semanticModel = Get-FabricItem -workspaceId $workspaceId | Where-Object { $_.displayName -eq $semanticModelName }
+                              if (-not $semanticModel) {
+                                  Write-Error "Semantic model '$semanticModelName' not found. Cannot deploy report."
+                                  throw "Semantic model not found for report."
+                              }
+                              Import-Report -reportPath $report.FullName -semanticModelId $semanticModel.Id -workspaceId $workspaceId
+                          }
+                      } else {
+                          Write-Host "No report changes detected."
+                      }
+
+                      Write-Host "=== Deployment to UAT Completed Successfully ==="
+
+                # Step 5: Clean Up
+                - task: DeleteFiles@1
+                  displayName: "Clean Up Temporary Files"
+                  inputs:
+                    SourceFolder: '$(System.ArtifactsDirectory)'
