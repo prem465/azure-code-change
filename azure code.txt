@@ -3615,53 +3615,70 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-trigger: none
+# ... (keep existing pipeline configuration until PowerShell task)
 
-parameters:
-  - name: UAT_WORKSPACE_NAME
-    type: string
-    default: 'YourUATWorkspaceName'
-
-pool:
-  vmImage: 'windows-latest'
-
-variables:
-  - group: 'powerbi'
-  - name: UAT_WORKSPACE_NAME
-    value: ${{ parameters.UAT_WORKSPACE_NAME }}
-
-jobs:
-  - job: Release
-    displayName: "CD Pipeline - Push Artifacts to UAT"
-
-    steps:
-      - checkout: none
-
-      # Keep the working download task
-      - task: DownloadBuildArtifacts@0
-        displayName: "Download Build Artifacts"
-        inputs:
-          buildType: 'specific'
-          project: '$(System.TeamProjectId)'
-          definition: 'Power-BI-(CI)'
-          buildVersionToDownload: 'latest'
-          artifactName: 'PowerBIArtifacts'
-          downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
-
-      # Verify downloaded files
       - task: PowerShell@2
-        displayName: 'Verify Downloaded Files'
+        displayName: '=== Installing Dependencies ==='
         inputs:
           pwsh: true
           targetType: inline
           script: |
-            $artifactPath = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-            Write-Host "Checking artifact path: $artifactPath"
-            Get-ChildItem -Path $artifactPath -Recurse | ForEach-Object {
-                Write-Host $_.FullName
+            Write-Host "=== Installing Required PowerShell Modules ==="
+            
+            # Force TLS 1.2
+            [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+            
+            # Install NuGet if needed
+            if (!(Get-PackageProvider -Name NuGet -ErrorAction SilentlyContinue)) {
+                Install-PackageProvider -Name NuGet -Force -Scope CurrentUser
             }
+            
+            # Configure PSGallery
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+            
+            # Remove any existing AzureRM modules
+            Get-Module -Name AzureRM* -ListAvailable | Uninstall-Module -Force -ErrorAction SilentlyContinue
+            
+            # Install required modules
+            $modules = @(
+                @{Name = "Az.Accounts"; MinimumVersion = "2.12.1"},
+                @{Name = "MicrosoftPowerBIMgmt"; MinimumVersion = "1.0.0"}
+            )
+            
+            foreach ($module in $modules) {
+                Write-Host "Installing $($module.Name)..."
+                Install-Module -Name $module.Name -MinimumVersion $module.MinimumVersion -Force -AllowClobber -Scope CurrentUser
+                Import-Module -Name $module.Name -Force -ErrorAction Stop
+            }
+            
+            # Create custom modules directory
+            $customModulesPath = ".\.nuget\custom_modules"
+            if (-not (Test-Path $customModulesPath)) {
+                New-Item -Path $customModulesPath -ItemType Directory -Force | Out-Null
+            }
+            
+            # Download Fabric modules
+            $fabricModules = @(
+                @{
+                    Url = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1"
+                    Filename = "FabricPS-PBIP.psm1"
+                },
+                @{
+                    Url = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+                    Filename = "FabricPS-PBIP.psd1"
+                }
+            )
+            
+            foreach ($module in $fabricModules) {
+                $destPath = Join-Path $customModulesPath $module.Filename
+                Write-Host "Downloading $($module.Filename)..."
+                Invoke-WebRequest -Uri $module.Url -OutFile $destPath
+            }
+            
+            Write-Host "Verifying module installation..."
+            Get-Module -ListAvailable | Where-Object { $_.Name -like "*Power*" -or $_.Name -like "*Az*" } | 
+                Format-Table Name, Version, Path
 
-      # Deploy to UAT with fixed semantic model handling
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
@@ -3674,25 +3691,33 @@ jobs:
           targetType: inline
           script: |
             try {
+                Write-Host "=== Starting Deployment Process ==="
+                
                 # Import required modules
-                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-                Import-Module Az.Accounts -Force
-                Import-Module MicrosoftPowerBIMgmt -Force
+                $customModulesPath = ".\.nuget\custom_modules"
+                $env:PSModulePath = "$customModulesPath;$env:PSModulePath"
+                
+                Write-Host "Importing modules..."
+                Import-Module Az.Accounts -Force -ErrorAction Stop
+                Import-Module MicrosoftPowerBIMgmt -Force -ErrorAction Stop
+                Import-Module "$customModulesPath\FabricPS-PBIP.psd1" -Force -ErrorAction Stop
+                
+                Write-Host "Module import successful"
 
                 # Authentication
                 $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                Write-Host "=== Authenticating ==="
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
-                
-                # Connect to services
+                Write-Host "`n=== Authenticating ==="
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
+                
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
                 Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                Write-Host "=== Getting Workspace ==="
+                # Get workspace
+                Write-Host "`n=== Getting Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
                     throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
@@ -3700,104 +3725,37 @@ jobs:
                 $workspaceId = $workspaceObj.Id
                 Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                # Function to validate and prepare PBISM
-                function Prepare-SemanticModel {
-                    param(
-                        [string]$modelPath
-                    )
-                    
-                    $pbismFile = Join-Path $modelPath "definition.pbism"
-                    if (!(Test-Path $pbismFile)) {
-                        throw "PBISM file not found at: $pbismFile"
-                    }
-
-                    # Read and validate PBISM content
-                    $pbismContent = Get-Content $pbismFile -Raw
-                    try {
-                        $null = $pbismContent | ConvertFrom-Json
-                    } catch {
-                        throw "Invalid PBISM JSON content: $_"
-                    }
-
-                    # Validate required files exist
-                    $requiredFiles = @(
-                        "definition.pbism"
-                    )
-
-                    foreach ($file in $requiredFiles) {
-                        $filePath = Join-Path $modelPath $file
-                        if (!(Test-Path $filePath)) {
-                            throw "Required file missing: $file"
-                        }
-                    }
-
-                    return $modelPath
-                }
-
-                # Function to import semantic model with proper error handling
-                function Import-SemanticModelSafely {
-                    param(
-                        [string]$workspaceId,
-                        [string]$modelPath,
-                        [string]$modelName
-                    )
-
-                    try {
-                        Write-Host "Preparing to import semantic model: $modelName"
-                        $preparedPath = Prepare-SemanticModel -modelPath $modelPath
-                        
-                        Write-Host "Importing semantic model from: $preparedPath"
-                        $result = Import-FabricItem -workspaceId $workspaceId `
-                            -path $preparedPath `
-                            -itemProperties @{
-                                displayName = $modelName
-                                itemType = "semanticModel"
-                            } `
-                            -ErrorAction Stop
-
-                        if ($result) {
-                            Write-Host "Successfully imported semantic model: $modelName"
-                            return $result
-                        } else {
-                            throw "Import-FabricItem returned null result"
-                        }
-                    }
-                    catch {
-                        Write-Error "Failed to import semantic model $modelName`: $_"
-                        throw
-                    }
-                }
-
-                # Define paths
+                # Process artifacts
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-                Write-Host "`nArtifact root: $artifactRoot"
-
-                # Find all semantic models
+                
+                # Find files
                 Write-Host "`n=== Scanning for Files ==="
-                $semanticModels = Get-ChildItem -Path $artifactRoot -Include "definition.pbism" -Recurse
-                $reports = Get-ChildItem -Path $artifactRoot -Include "definition.pbir" -Recurse
-
+                $semanticModels = Get-ChildItem -Path $artifactRoot -Filter "*.pbism" -Recurse
+                $reports = Get-ChildItem -Path $artifactRoot -Filter "*.pbir" -Recurse
+                
                 Write-Host "Found $($semanticModels.Count) semantic model(s)"
                 Write-Host "Found $($reports.Count) report(s)"
 
-                # Import semantic models
+                # Import models
                 $importedModels = @{}
                 foreach ($model in $semanticModels) {
                     $modelFolder = $model.Directory
                     $modelName = $modelFolder.Name
                     
-                    Write-Host "`nProcessing semantic model: $modelName"
+                    Write-Host "`nProcessing model: $modelName from $($modelFolder.FullName)"
                     try {
-                        $result = Import-SemanticModelSafely `
-                            -workspaceId $workspaceId `
-                            -modelPath $modelFolder.FullName `
-                            -modelName $modelName
-
-                        $importedModels[$modelFolder.FullName] = $result.id
-                        Write-Host "Successfully imported semantic model: $modelName with ID: $($result.id)"
+                        $result = Import-FabricItem -workspaceId $workspaceId -path $modelFolder.FullName -itemProperties @{
+                            displayName = $modelName
+                            itemType = "semanticModel"
+                        }
+                        
+                        if ($result) {
+                            $importedModels[$modelFolder.FullName] = $result.id
+                            Write-Host "Successfully imported model: $modelName"
+                        }
                     }
                     catch {
-                        Write-Error "Failed to import semantic model $modelName`: $_"
+                        Write-Error "Failed to import model $modelName`: $_"
                         continue
                     }
                 }
@@ -3808,31 +3766,29 @@ jobs:
                     $reportName = $reportFolder.Name
                     
                     Write-Host "`nProcessing report: $reportName"
-                    
-                    # Find associated model ID
-                    $modelId = $importedModels[$reportFolder.FullName]
-                    if ($modelId) {
-                        try {
-                            Import-FabricItem -workspaceId $workspaceId `
-                                -path $reportFolder.FullName `
-                                -itemProperties @{
-                                    displayName = $reportName
-                                    itemType = "report"
-                                    semanticModelId = $modelId
-                                }
+                    try {
+                        $modelId = $importedModels[$reportFolder.FullName]
+                        if ($modelId) {
+                            Import-FabricItem -workspaceId $workspaceId -path $reportFolder.FullName -itemProperties @{
+                                displayName = $reportName
+                                itemType = "report"
+                                semanticModelId = $modelId
+                            }
                             Write-Host "Successfully imported report: $reportName"
                         }
-                        catch {
-                            Write-Error "Failed to import report $reportName`: $_"
+                        else {
+                            Write-Warning "No semantic model found for report: $reportName"
                         }
                     }
-                    else {
-                        Write-Warning "No semantic model found for report: $reportName"
+                    catch {
+                        Write-Error "Failed to import report $reportName`: $_"
+                        continue
                     }
                 }
 
             }
             catch {
                 Write-Error "Deployment failed: $_"
+                Write-Error $_.ScriptStackTrace
                 throw
             }
