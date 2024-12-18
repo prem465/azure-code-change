@@ -3620,7 +3620,7 @@ trigger: none
 resources:
   pipelines:
     - pipeline: ciPipelineAlias
-      source: 'Power-BI-(CI)'  # EXACT CI pipeline name
+      source: 'Power-BI-(CI)'  # EXACT name of your CI pipeline
       trigger:
         branches:
           include:
@@ -3650,9 +3650,9 @@ jobs:
     displayName: "CD Pipeline - Promote to UAT"
 
     steps:
-      - checkout: none  # No git diff here, CI pipeline already filtered changes
+      - checkout: none  # No Git logic here, CI handled changes
 
-      # Download only changed items from CI pipeline
+      # Download the artifact from CI pipeline with only changed items
       - task: DownloadPipelineArtifact@2
         displayName: "Download Changed Items from 'Power-BI-(CI)'"
         inputs:
@@ -3753,19 +3753,20 @@ jobs:
                     exit 0
                 }
 
-                # Changed semantic models in folders under SemanticModels, each with <ModelName>.pbism
+                # Changed semantic models: folders under SemanticModels each containing *.pbism
                 $smRoot = Join-Path $artifactRoot "SemanticModels"
                 $smFolders = if (Test-Path $smRoot) {
                   Get-ChildItem -Path $smRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-                    Test-Path (Join-Path $_.FullName "*.pbism")
+                    (Get-ChildItem -Path $_.FullName -Include "*.pbism" -File -ErrorAction SilentlyContinue)
                   }
                 }
 
-                # Changed reports in folders under Reports, each with <ReportName>.pbir and a *.pbism for its dataset
+                # Changed reports: folders under Reports each containing *.pbir and *.pbism for its dataset
                 $rptRoot = Join-Path $artifactRoot "Reports"
                 $rptFolders = if (Test-Path $rptRoot) {
                   Get-ChildItem -Path $rptRoot -Directory -ErrorAction SilentlyContinue | Where-Object {
-                    (Test-Path (Join-Path $_.FullName "*.pbir")) -and (Test-Path (Join-Path $_.FullName "*.pbism"))
+                    (Get-ChildItem -Path $_.FullName -Include "*.pbir" -File -ErrorAction SilentlyContinue) -and
+                    (Get-ChildItem -Path $_.FullName -Include "*.pbism" -File -ErrorAction SilentlyContinue)
                   }
                 }
 
@@ -3784,10 +3785,10 @@ jobs:
                 function Import-SemanticModel($modelFolder, $workspaceID) {
                     Write-Host ("Importing semantic model from {0}" -f $modelFolder)
                     $folderName = Split-Path $modelFolder -Leaf
-                    # Import the semantic model with itemProperties
+                    # Provide itemProperties to avoid missing properties error
                     $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolder -itemProperties @{
                       displayName = $folderName
-                      itemType = "semanticModel"
+                      itemType    = "semanticModel"
                     }
                     Write-Host "Semantic model imported successfully."
                     return $smItem
@@ -3795,26 +3796,25 @@ jobs:
 
                 function Import-Report($reportFolder, $workspaceID) {
                     Write-Host ("Importing report from {0}" -f $reportFolder)
-                    $reportName = Split-Path $reportFolder -Leaf
+                    $folderName = Split-Path $reportFolder -Leaf
 
-                    # First, find the associated pbism file in the same folder to re-import its model
-                    $pbismFile = Get-ChildItem -Path $reportFolder -Recurse -Include "*.pbism" -ErrorAction SilentlyContinue
+                    # Find associated pbism file in the same folder
+                    $pbismFile = Get-ChildItem -Path $reportFolder -Include "*.pbism" -File -ErrorAction SilentlyContinue
                     if (-not $pbismFile) {
-                        throw "No .pbism file found for report $reportName. Cannot determine semantic model."
+                        throw "No pbism file found in $reportFolder for the report's dataset."
                     }
 
-                    # Import the semantic model for this report
-                    $modelFolder = Split-Path $pbismFile.DirectoryName -Parent
+                    # Import semantic model for this report
                     $modelImported = Import-SemanticModel $pbismFile.DirectoryName $workspaceID
                     $semanticModelId = $modelImported.id
                     if (-not $semanticModelId) {
                         throw "Semantic model not properly imported, cannot import report."
                     }
 
-                    # Now import the report with itemProperties
+                    # Now import the report
                     Import-FabricItem -workspaceId $workspaceID -path $reportFolder -itemProperties @{
-                      displayName = $reportName
-                      itemType = "report"
+                      displayName     = $folderName
+                      itemType        = "report"
                       semanticModelId = $semanticModelId
                     } | Out-Null
                     Write-Host "Report imported successfully."
@@ -3837,6 +3837,7 @@ jobs:
                 }
 
                 Write-Host "All changes imported successfully. Pipeline completed."
+
             } catch {
                 Write-Error ("An error occurred: {0}" -f $_)
                 throw $_
