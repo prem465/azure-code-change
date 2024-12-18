@@ -3659,35 +3659,49 @@ jobs:
           artifact: PowerBIArtifacts
           path: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
-      # Add debug step to verify download
+      # Enhanced debug step to verify exact download structure
       - task: PowerShell@2
-        displayName: 'Verify Downloaded Artifacts'
+        displayName: 'Verify Downloaded Artifacts Structure'
         inputs:
           pwsh: true
           targetType: inline
           script: |
-            Write-Host "=== Listing Downloaded Artifacts Structure ==="
+            Write-Host "=== Detailed Artifact Structure Analysis ==="
             $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
             
-            Write-Host "`nChecking Reports folder:"
-            if (Test-Path "$artifactRoot/Reports") {
-                Get-ChildItem -Path "$artifactRoot/Reports" -Recurse | ForEach-Object {
-                    Write-Host $_.FullName
+            Write-Host "`nFull path of artifact root: $artifactRoot"
+            Write-Host "Does artifact root exist: $(Test-Path $artifactRoot)"
+            
+            Write-Host "`nListing ALL files and folders recursively:"
+            Get-ChildItem -Path $artifactRoot -Recurse -Force | ForEach-Object {
+                $indent = "  " * ($_.FullName.Split([IO.Path]::DirectorySeparatorChar).Count - $artifactRoot.Split([IO.Path]::DirectorySeparatorChar).Count)
+                if ($_.PSIsContainer) {
+                    Write-Host "${indent}[DIR] $($_.Name)"
+                } else {
+                    Write-Host "${indent}[FILE] $($_.Name) (Size: $([math]::Round($_.Length/1KB, 2)) KB)"
                 }
-            } else {
-                Write-Host "Reports folder not found!"
             }
             
-            Write-Host "`nChecking Semantic Models folder:"
-            if (Test-Path "$artifactRoot/Semantic Models") {
-                Get-ChildItem -Path "$artifactRoot/Semantic Models" -Recurse | ForEach-Object {
-                    Write-Host $_.FullName
+            # Store paths for later use
+            $foundPaths = @{}
+            Get-ChildItem -Path $artifactRoot -Recurse -Force | ForEach-Object {
+                if ($_.Name -match '\.pbir$') {
+                    $foundPaths['pbirPath'] = $_.DirectoryName
                 }
-            } else {
-                Write-Host "Semantic Models folder not found!"
+                if ($_.Name -match '\.pbism$') {
+                    $foundPaths['pbismPath'] = $_.DirectoryName
+                }
+            }
+            
+            # Save paths to pipeline variables for use in later steps
+            if ($foundPaths['pbirPath']) {
+                Write-Host "##vso[task.setvariable variable=PBIR_PATH]$($foundPaths['pbirPath'])"
+            }
+            if ($foundPaths['pbismPath']) {
+                Write-Host "##vso[task.setvariable variable=PBISM_PATH]$($foundPaths['pbismPath'])"
             }
 
-      # Install Dependencies
+      # Install Dependencies (unchanged)
       - task: PowerShell@2
         displayName: '=== Installing Dependencies ==='
         inputs:
@@ -3718,7 +3732,7 @@ jobs:
 
             Write-Host "Dependencies installed successfully."
 
-      # Push Items to UAT with correct path handling
+      # Updated promotion logic using found paths
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
@@ -3727,6 +3741,8 @@ jobs:
           TENANT_ID: $(tenantid)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
           UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+          PBIR_PATH: $(PBIR_PATH)
+          PBISM_PATH: $(PBISM_PATH)
         inputs:
           pwsh: true
           targetType: inline
@@ -3740,6 +3756,7 @@ jobs:
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
+                # Authentication code remains the same...
                 Write-Host "=== Authenticating to Fabric ==="
                 $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
                 $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
@@ -3774,13 +3791,6 @@ jobs:
                   Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
                 }
 
-                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-                Write-Host "Checking artifact root path: $artifactRoot"
-                
-                if (!(Test-Path $artifactRoot)) {
-                    throw "Artifact root path not found: $artifactRoot"
-                }
-
                 Write-Host "=== Retrieving UAT Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
                 if (-not $workspaceObj) {
@@ -3788,70 +3798,50 @@ jobs:
                 }
                 $workspaceID = $workspaceObj.Id
 
-                # Process Semantic Models first
-                $semanticModelsPath = Join-Path $artifactRoot "Semantic Models"
-                if (Test-Path $semanticModelsPath) {
-                    Write-Host "`n=== Processing Semantic Models ==="
-                    $modelFolders = Get-ChildItem -Path $semanticModelsPath -Directory -ErrorAction SilentlyContinue
-                    
-                    if ($modelFolders) {
-                        foreach ($modelFolder in $modelFolders) {
-                            Write-Host "Processing semantic model: $($modelFolder.Name)"
-                            $pbismFile = Get-ChildItem -Path $modelFolder.FullName -Filter "*.pbism" -File -ErrorAction SilentlyContinue
-                            
-                            if ($pbismFile) {
-                                Write-Host "Importing semantic model from: $($pbismFile.FullName)"
-                                $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolder.FullName -itemProperties @{
-                                    displayName = $modelFolder.Name
-                                    itemType = "semanticModel"
-                                }
-                                Write-Host "Semantic model imported successfully with ID: $($smItem.id)"
-                            }
+                # Process semantic models
+                if ($env:PBISM_PATH) {
+                    Write-Host "`n=== Processing Semantic Models from: $($env:PBISM_PATH) ==="
+                    $pbismFiles = Get-ChildItem -Path $env:PBISM_PATH -Filter "*.pbism" -File
+                    foreach ($pbismFile in $pbismFiles) {
+                        Write-Host "Importing semantic model: $($pbismFile.Name)"
+                        $modelName = [System.IO.Path]::GetFileNameWithoutExtension($pbismFile.Name)
+                        $smItem = Import-FabricItem -workspaceId $workspaceID -path $pbismFile.DirectoryName -itemProperties @{
+                            displayName = $modelName
+                            itemType = "semanticModel"
                         }
-                    } else {
-                        Write-Host "No semantic model folders found in Semantic Models directory"
+                        Write-Host "Semantic model imported successfully with ID: $($smItem.id)"
                     }
-                } else {
-                    Write-Host "Semantic Models directory not found"
                 }
 
-                # Process Reports
-                $reportsPath = Join-Path $artifactRoot "Reports"
-                if (Test-Path $reportsPath) {
-                    Write-Host "`n=== Processing Reports ==="
-                    $reportFolders = Get-ChildItem -Path $reportsPath -Directory -ErrorAction SilentlyContinue
-                    
-                    if ($reportFolders) {
-                        foreach ($reportFolder in $reportFolders) {
-                            Write-Host "Processing report: $($reportFolder.Name)"
-                            $pbirFile = Get-ChildItem -Path $reportFolder.FullName -Filter "*.pbir" -File -ErrorAction SilentlyContinue
-                            $pbismFile = Get-ChildItem -Path $reportFolder.FullName -Filter "*.pbism" -File -ErrorAction SilentlyContinue
+                # Process reports
+                if ($env:PBIR_PATH) {
+                    Write-Host "`n=== Processing Reports from: $($env:PBIR_PATH) ==="
+                    $pbirFiles = Get-ChildItem -Path $env:PBIR_PATH -Filter "*.pbir" -File
+                    foreach ($pbirFile in $pbirFiles) {
+                        Write-Host "Processing report: $($pbirFile.Name)"
+                        
+                        # Look for associated PBISM in the same directory
+                        $pbismFile = Get-ChildItem -Path $pbirFile.DirectoryName -Filter "*.pbism" -File
+                        if ($pbismFile) {
+                            Write-Host "Found associated semantic model: $($pbismFile.Name)"
                             
-                            if ($pbirFile -and $pbismFile) {
-                                Write-Host "Found both PBIR and PBISM files in: $($reportFolder.Name)"
-                                
-                                # Import the semantic model first
-                                Write-Host "Importing associated semantic model"
-                                $modelImported = Import-FabricItem -workspaceId $workspaceID -path $reportFolder.FullName -itemProperties @{
-                                    displayName = "$($reportFolder.Name)_Model"
-                                    itemType = "semanticModel"
-                                }
-                                
-                                # Then import the report
-                                Write-Host "Importing report"
-                                Import-FabricItem -workspaceId $workspaceID -path $reportFolder.FullName -itemProperties @{
-                                    displayName = $reportFolder.Name
-                                    itemType = "report"
-                                    semanticModelId = $modelImported.id
-                                }
-                                Write-Host "Report and its semantic model imported successfully"
+                            # Import semantic model first
+                            $modelName = [System.IO.Path]::GetFileNameWithoutExtension($pbismFile.Name)
+                            $modelImported = Import-FabricItem -workspaceId $workspaceID -path $pbismFile.DirectoryName -itemProperties @{
+                                displayName = $modelName
+                                itemType = "semanticModel"
                             }
+                            
+                            # Import report
+                            $reportName = [System.IO.Path]::GetFileNameWithoutExtension($pbirFile.Name)
+                            Import-FabricItem -workspaceId $workspaceID -path $pbirFile.DirectoryName -itemProperties @{
+                                displayName = $reportName
+                                itemType = "report"
+                                semanticModelId = $modelImported.id
+                            }
+                            Write-Host "Report and semantic model imported successfully"
                         }
-                    } else {
-                        Write-Host "No report folders found in Reports directory"
                     }
-                } else {
-                    Write-Host "Reports directory not found"
                 }
 
                 Write-Host "`nAll changes imported successfully. Pipeline completed."
