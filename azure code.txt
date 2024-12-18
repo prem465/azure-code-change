@@ -3615,7 +3615,7 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-# ... (keep existing pipeline configuration)
+# ... (keep existing pipeline configuration until the PowerShell task)
 
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
@@ -3629,23 +3629,26 @@ ____________________________________________________________________________
           targetType: inline
           script: |
             try {
+                Write-Host "=== Starting Deployment Process ==="
+                
+                # Import required modules
                 Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
 
-                # Authentication
+                # Authentication setup
                 $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                # Connect to services
+                Write-Host "=== Authenticating ==="
+                # Service Principal Authentication
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-                
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
                 Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                # Get workspace
                 Write-Host "=== Getting Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
@@ -3654,119 +3657,179 @@ ____________________________________________________________________________
                 $workspaceId = $workspaceObj.Id
                 Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                # Define paths
+                # Define artifact root path
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
                 Write-Host "Artifact root path: $artifactRoot"
 
-                # Function to find semantic model for a report
-                function Find-SemanticModel {
-                    param($reportPath)
-                    
-                    Write-Host "Looking for semantic model for report in: $reportPath"
-                    
-                    # First, look in the same directory
-                    $sameDirectoryModel = Get-ChildItem -Path (Split-Path $reportPath) -Filter "*.pbism" -File
-                    if ($sameDirectoryModel) {
-                        Write-Host "Found model in same directory: $($sameDirectoryModel.FullName)"
-                        return $sameDirectoryModel
+                # Function to validate PBISM file
+                function Test-PBISMFile {
+                    param($filePath)
+                    try {
+                        if (!(Test-Path $filePath)) {
+                            Write-Host "File not found: $filePath"
+                            return $false
+                        }
+                        $content = Get-Content $filePath -Raw -ErrorAction Stop
+                        if ([string]::IsNullOrWhiteSpace($content)) {
+                            Write-Host "File is empty: $filePath"
+                            return $false
+                        }
+                        # Basic JSON validation for pbism
+                        $null = $content | ConvertFrom-Json -ErrorAction Stop
+                        return $true
                     }
-                    
-                    # Look in parent directory
-                    $parentDirectoryModel = Get-ChildItem -Path (Split-Path (Split-Path $reportPath)) -Filter "*.pbism" -File -Recurse
-                    if ($parentDirectoryModel) {
-                        Write-Host "Found model in parent directory: $($parentDirectoryModel.FullName)"
-                        return $parentDirectoryModel
+                    catch {
+                        Write-Host "Invalid file content: $filePath - $_"
+                        return $false
                     }
-                    
-                    # Look in entire artifact directory
-                    $allModels = Get-ChildItem -Path $artifactRoot -Filter "*.pbism" -File -Recurse
-                    if ($allModels) {
-                        Write-Host "Found model in artifacts: $($allModels[0].FullName)"
-                        return $allModels[0]
-                    }
-                    
-                    return $null
                 }
 
-                # Find all files
+                # Function to import semantic model with retry
+                function Import-SemanticModelWithRetry {
+                    param (
+                        $workspaceId,
+                        $modelPath,
+                        $modelName
+                    )
+                    
+                    $maxRetries = 3
+                    $retryCount = 0
+                    $backoffSeconds = 5
+                    
+                    do {
+                        $retryCount++
+                        Write-Host "Attempt $retryCount to import semantic model: $modelName"
+                        
+                        try {
+                            # Validate model files
+                            $pbismPath = Join-Path $modelPath "definition.pbism"
+                            if (!(Test-PBISMFile $pbismPath)) {
+                                throw "Invalid PBISM file: $pbismPath"
+                            }
+
+                            # Import with explicit file handling
+                            Write-Host "Importing from path: $modelPath"
+                            $importParams = @{
+                                workspaceId = $workspaceId
+                                path = $modelPath
+                                itemProperties = @{
+                                    displayName = $modelName
+                                    itemType = "semanticModel"
+                                }
+                            }
+
+                            $result = Import-FabricItem @importParams -ErrorAction Stop
+                            Write-Host "Successfully imported model: $modelName"
+                            return $result
+                        }
+                        catch {
+                            Write-Warning "Import attempt $retryCount failed: $_"
+                            if ($retryCount -lt $maxRetries) {
+                                Write-Host "Waiting $backoffSeconds seconds before retry..."
+                                Start-Sleep -Seconds $backoffSeconds
+                                $backoffSeconds *= 2  # Exponential backoff
+                            }
+                            else {
+                                throw $_
+                            }
+                        }
+                    } while ($retryCount -lt $maxRetries)
+                }
+
+                # Scan for files
                 Write-Host "`n=== Scanning for Files ==="
-                $allPbismFiles = Get-ChildItem -Path $artifactRoot -Filter "*.pbism" -File -Recurse
-                $allPbirFiles = Get-ChildItem -Path $artifactRoot -Filter "*.pbir" -File -Recurse
+                $modelFiles = Get-ChildItem -Path $artifactRoot -Filter "definition.pbism" -Recurse
+                $reportFiles = Get-ChildItem -Path $artifactRoot -Filter "definition.pbir" -Recurse
 
-                Write-Host "Found $($allPbismFiles.Count) semantic model(s)"
-                Write-Host "Found $($allPbirFiles.Count) report(s)"
+                Write-Host "Found $($modelFiles.Count) semantic model(s)"
+                Write-Host "Found $($reportFiles.Count) report(s)"
 
-                # Dictionary to store imported models
+                # Track imported models
                 $importedModels = @{}
 
-                # Process semantic models first
-                if ($allPbismFiles) {
+                # Process semantic models
+                if ($modelFiles) {
                     Write-Host "`n=== Processing Semantic Models ==="
-                    foreach ($pbismFile in $allPbismFiles) {
-                        Write-Host "Processing model: $($pbismFile.Name)"
+                    foreach ($modelFile in $modelFiles) {
+                        $modelFolder = $modelFile.Directory
+                        $modelName = $modelFolder.Name
+                        Write-Host "`nProcessing model: $modelName"
+
                         try {
-                            $modelResult = Import-FabricItem -workspaceId $workspaceId -path $pbismFile.DirectoryName -itemProperties @{
-                                displayName = [System.IO.Path]::GetFileNameWithoutExtension($pbismFile.Name)
-                                itemType = "semanticModel"
-                            } -Verbose
-                            
+                            $modelResult = Import-SemanticModelWithRetry `
+                                -workspaceId $workspaceId `
+                                -modelPath $modelFolder.FullName `
+                                -modelName $modelName
+
                             if ($modelResult) {
-                                $importedModels[$pbismFile.FullName] = $modelResult.id
-                                Write-Host "Successfully imported model with ID: $($modelResult.id)"
+                                $importedModels[$modelFolder.FullName] = $modelResult.id
+                                Write-Host "Successfully imported model: $modelName with ID: $($modelResult.id)"
                             }
                         }
                         catch {
-                            Write-Error "Failed to import model: $_"
+                            Write-Error "Failed to import model $modelName after all retries: $_"
                             continue
                         }
                     }
                 }
 
                 # Process reports
-                if ($allPbirFiles) {
+                if ($reportFiles) {
                     Write-Host "`n=== Processing Reports ==="
-                    foreach ($pbirFile in $allPbirFiles) {
-                        Write-Host "Processing report: $($pbirFile.Name)"
-                        
-                        # Find associated model
-                        $modelFile = Find-SemanticModel -reportPath $pbirFile.FullName
+                    foreach ($reportFile in $reportFiles) {
+                        $reportFolder = $reportFile.Directory
+                        $reportName = $reportFolder.Name
+                        Write-Host "`nProcessing report: $reportName"
+
+                        # Look for model in the same folder
+                        $modelFile = Get-ChildItem -Path $reportFolder.FullName -Filter "definition.pbism" -File
                         
                         if ($modelFile) {
                             try {
-                                # Import model if not already imported
-                                if (-not $importedModels.ContainsKey($modelFile.FullName)) {
-                                    Write-Host "Importing associated model: $($modelFile.Name)"
-                                    $modelResult = Import-FabricItem -workspaceId $workspaceId -path $modelFile.DirectoryName -itemProperties @{
-                                        displayName = [System.IO.Path]::GetFileNameWithoutExtension($modelFile.Name)
-                                        itemType = "semanticModel"
-                                    } -Verbose
-                                    
-                                    $importedModels[$modelFile.FullName] = $modelResult.id
+                                # Get or import the model
+                                $modelId = $null
+                                if ($importedModels.ContainsKey($reportFolder.FullName)) {
+                                    $modelId = $importedModels[$reportFolder.FullName]
+                                    Write-Host "Using previously imported model with ID: $modelId"
+                                }
+                                else {
+                                    Write-Host "Importing associated model first"
+                                    $modelResult = Import-SemanticModelWithRetry `
+                                        -workspaceId $workspaceId `
+                                        -modelPath $reportFolder.FullName `
+                                        -modelName "${reportName}_Model"
+
+                                    $modelId = $modelResult.id
+                                    $importedModels[$reportFolder.FullName] = $modelId
                                 }
 
                                 # Import report
-                                $modelId = $importedModels[$modelFile.FullName]
                                 Write-Host "Importing report with model ID: $modelId"
-                                
-                                Import-FabricItem -workspaceId $workspaceId -path $pbirFile.DirectoryName -itemProperties @{
-                                    displayName = [System.IO.Path]::GetFileNameWithoutExtension($pbirFile.Name)
+                                Import-FabricItem -workspaceId $workspaceId -path $reportFolder.FullName -itemProperties @{
+                                    displayName = $reportName
                                     itemType = "report"
                                     semanticModelId = $modelId
-                                } -Verbose
-                                
-                                Write-Host "Successfully imported report: $($pbirFile.Name)"
+                                }
+                                Write-Host "Successfully imported report: $reportName"
                             }
                             catch {
-                                Write-Error "Failed to import report $($pbirFile.Name): $_"
+                                Write-Error "Failed to import report $reportName`: $_"
                                 continue
                             }
-                        } else {
-                            Write-Error "No semantic model found for report: $($pbirFile.Name)"
+                        }
+                        else {
+                            Write-Warning "No semantic model found for report: $reportName"
                         }
                     }
                 }
 
-            } catch {
+                Write-Host "`n=== Deployment Summary ==="
+                Write-Host "Successfully processed:"
+                Write-Host "- $($importedModels.Count) semantic models"
+                Write-Host "- $($reportFiles.Count) reports"
+
+            }
+            catch {
                 Write-Error "Deployment failed: $_"
                 Write-Error $_.ScriptStackTrace
                 throw $_
