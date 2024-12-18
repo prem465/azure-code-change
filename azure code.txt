@@ -3615,182 +3615,137 @@ jobs:
 RELEASE
 ____________________________________________________________________________
 
-trigger: none
+# ... (previous code remains same until the deployment script)
 
-parameters:
-  - name: UAT_WORKSPACE_NAME
-    type: string
-    default: 'YourUATWorkspaceName'
-  - name: UAT_ONELAKE_ENDPOINT
-    type: string
-    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
-
-pool:
-  vmImage: 'windows-latest'
-
-variables:
-  - group: 'powerbi'
-  - name: UAT_WORKSPACE_NAME
-    value: ${{ parameters.UAT_WORKSPACE_NAME }}
-  - name: UAT_ONELAKE_ENDPOINT
-    value: ${{ parameters.UAT_ONELAKE_ENDPOINT }}
-
-jobs:
-  - job: Release
-    displayName: "CD Pipeline - Push Artifacts to UAT"
-
-    steps:
-      - checkout: none
-
-      # Using the working download task
-      - task: DownloadBuildArtifacts@0
-        displayName: "Download Build Artifacts"
-        inputs:
-          buildType: 'specific'
-          project: '$(System.TeamProjectId)'
-          definition: 'Power-BI-(CI)'
-          buildVersionToDownload: 'latest'
-          artifactName: 'PowerBIArtifacts'
-          downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
-
-      # Debug step to verify files
-      - task: PowerShell@2
-        displayName: 'Verify Downloaded Files'
-        inputs:
-          pwsh: true
-          targetType: inline
-          script: |
-            $artifactPath = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-            Write-Host "Checking path: $artifactPath"
-            
-            Get-ChildItem -Path $artifactPath -Recurse | ForEach-Object {
-                Write-Host $_.FullName
-            }
-
-      # Install Dependencies
-      - task: PowerShell@2
-        displayName: '=== Installing Dependencies ==='
-        inputs:
-          pwsh: true
-          targetType: inline
-          script: |
-            Write-Host "Installing required modules..."
-            Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
-            Install-Module -Name MicrosoftPowerBIMgmt -Scope CurrentUser -AllowClobber -Force
-
-            # Create custom modules directory
-            if (-not (Test-Path ".\.nuget\custom_modules")) {
-              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force | Out-Null
-            }
-
-            # Download Fabric modules
-            @(
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-            ) | ForEach-Object {
-              $fileName = Split-Path $_ -Leaf
-              $destPath = Join-Path ".\.nuget\custom_modules" $fileName
-              Invoke-WebRequest -Uri $_ -OutFile $destPath
-            }
-
-      # Deploy to UAT
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
           CLIENT_SECRET: $(clientsecret)
           CLIENT_ID: $(clinetid)
           TENANT_ID: $(tenantid)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
         inputs:
           pwsh: true
           targetType: inline
           script: |
             try {
-                # Import required modules
+                Write-Host "=== Starting Deployment Process ==="
+                
+                # Import modules with explicit removal of AzureRM
+                Get-Module -Name AzureRM* -ListAvailable | Remove-Module -Force -ErrorAction SilentlyContinue
                 Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-                Import-Module Az.Accounts -Force
-                Import-Module MicrosoftPowerBIMgmt -Force
+                Import-Module Az.Accounts -Force -ErrorAction Stop
+                Import-Module MicrosoftPowerBIMgmt -Force -ErrorAction Stop
 
-                # Set up authentication
+                # Set artifact paths
+                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
+                Write-Host "Checking artifact root path: $artifactRoot"
+                
+                if (!(Test-Path $artifactRoot)) {
+                    throw "Artifact root path not found: $artifactRoot"
+                }
+
+                # List all files in artifact directory
+                Write-Host "`nFiles in artifact directory:"
+                Get-ChildItem -Path $artifactRoot -Recurse | ForEach-Object {
+                    Write-Host " - $($_.FullName)"
+                }
+
+                # Authentication
                 $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                Write-Host "=== Authenticating ==="
-                # Convert secure string to plain text
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
-
-                # Authenticate with services
-                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
-                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-                Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
-
-                Write-Host "=== Getting Workspace ==="
-                $workspaceObj = Get-FabricWorkspace -workspaceName "$(UAT_WORKSPACE_NAME)"
+                Write-Host "`n=== Authenticating ==="
+                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+                
+                # Get workspace
+                Write-Host "`n=== Getting Workspace ==="
+                $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
-                    throw "UAT workspace '$(UAT_WORKSPACE_NAME)' not found."
+                    throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
                 }
                 $workspaceId = $workspaceObj.Id
                 Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                # Define artifact paths
-                $artifactPath = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-                $semanticModelsPath = Join-Path $artifactPath "Semantic Models"
-                $reportsPath = Join-Path $artifactPath "Reports"
-
                 # Process Semantic Models
                 Write-Host "`n=== Processing Semantic Models ==="
+                $semanticModelsPath = Join-Path $artifactRoot "Semantic Models"
+                Write-Host "Looking for semantic models in: $semanticModelsPath"
+                
                 if (Test-Path $semanticModelsPath) {
-                    $modelFolders = Get-ChildItem -Path $semanticModelsPath -Directory
-                    foreach ($modelFolder in $modelFolders) {
-                        Write-Host "Processing model: $($modelFolder.Name)"
+                    $modelFiles = Get-ChildItem -Path $semanticModelsPath -Include "*.pbism" -Recurse
+                    Write-Host "Found $($modelFiles.Count) semantic model files"
+                    
+                    foreach ($modelFile in $modelFiles) {
+                        Write-Host "`nProcessing model: $($modelFile.Name)"
                         try {
-                            $modelResult = Import-FabricItem -workspaceId $workspaceId -path $modelFolder.FullName -itemProperties @{
-                                displayName = $modelFolder.Name
+                            $modelResult = Import-FabricItem -workspaceId $workspaceId -path $modelFile.DirectoryName -itemProperties @{
+                                displayName = [System.IO.Path]::GetFileNameWithoutExtension($modelFile.Name)
                                 itemType = "semanticModel"
-                            }
-                            Write-Host "Successfully imported model: $($modelFolder.Name)"
-                            # Store the model ID for later use with reports
-                            $Global:ImportedModels[$modelFolder.Name] = $modelResult.id
+                            } -Verbose
+                            Write-Host "Successfully imported model: $($modelFile.Name)"
+                            $Global:ImportedModels[$modelFile.Name] = $modelResult.id
                         }
                         catch {
-                            Write-Error "Failed to import model $($modelFolder.Name): $_"
+                            Write-Error "Failed to import model $($modelFile.Name): $_"
+                            Write-Error $_.Exception.Message
+                            Write-Error $_.ScriptStackTrace
                             throw $_
                         }
                     }
+                } else {
+                    Write-Host "No Semantic Models directory found at: $semanticModelsPath"
                 }
 
                 # Process Reports
                 Write-Host "`n=== Processing Reports ==="
+                $reportsPath = Join-Path $artifactRoot "Reports"
+                Write-Host "Looking for reports in: $reportsPath"
+                
                 if (Test-Path $reportsPath) {
-                    $reportFolders = Get-ChildItem -Path $reportsPath -Directory
-                    foreach ($reportFolder in $reportFolders) {
-                        Write-Host "Processing report: $($reportFolder.Name)"
+                    $reportFiles = Get-ChildItem -Path $reportsPath -Include "*.pbir" -Recurse
+                    Write-Host "Found $($reportFiles.Count) report files"
+                    
+                    foreach ($reportFile in $reportFiles) {
+                        Write-Host "`nProcessing report: $($reportFile.Name)"
                         try {
-                            # Get the associated model ID (assuming report and model have same name)
-                            $modelId = $Global:ImportedModels[$reportFolder.Name]
-                            if ($modelId) {
-                                Import-FabricItem -workspaceId $workspaceId -path $reportFolder.FullName -itemProperties @{
-                                    displayName = $reportFolder.Name
+                            $relatedModel = Get-ChildItem -Path $reportFile.DirectoryName -Include "*.pbism" -File
+                            if ($relatedModel) {
+                                Write-Host "Found related model: $($relatedModel.Name)"
+                                
+                                # Import model first
+                                $modelResult = Import-FabricItem -workspaceId $workspaceId -path $relatedModel.DirectoryName -itemProperties @{
+                                    displayName = [System.IO.Path]::GetFileNameWithoutExtension($relatedModel.Name)
+                                    itemType = "semanticModel"
+                                } -Verbose
+                                
+                                # Import report
+                                Import-FabricItem -workspaceId $workspaceId -path $reportFile.DirectoryName -itemProperties @{
+                                    displayName = [System.IO.Path]::GetFileNameWithoutExtension($reportFile.Name)
                                     itemType = "report"
-                                    semanticModelId = $modelId
-                                }
-                                Write-Host "Successfully imported report: $($reportFolder.Name)"
-                            }
-                            else {
-                                Write-Warning "No matching model found for report: $($reportFolder.Name)"
+                                    semanticModelId = $modelResult.id
+                                } -Verbose
+                                Write-Host "Successfully imported report and its model"
+                            } else {
+                                Write-Warning "No related model found for report: $($reportFile.Name)"
                             }
                         }
                         catch {
-                            Write-Error "Failed to import report $($reportFolder.Name): $_"
+                            Write-Error "Failed to import report $($reportFile.Name): $_"
+                            Write-Error $_.Exception.Message
+                            Write-Error $_.ScriptStackTrace
                             throw $_
                         }
                     }
+                } else {
+                    Write-Host "No Reports directory found at: $reportsPath"
                 }
 
-                Write-Host "`n=== Deployment Complete ==="
-
             } catch {
-                Write-Error "Deployment failed: $_"
+                Write-Error "Deployment failed with error: $_"
+                Write-Error $_.Exception.Message
                 Write-Error $_.ScriptStackTrace
                 throw $_
             }
