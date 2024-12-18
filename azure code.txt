@@ -3621,6 +3621,9 @@ parameters:
   - name: UAT_WORKSPACE_NAME
     type: string
     default: 'YourUATWorkspaceName'
+  - name: UAT_ONELAKE_ENDPOINT
+    type: string
+    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
 
 pool:
   vmImage: 'windows-latest'
@@ -3629,6 +3632,8 @@ variables:
   - group: 'powerbi'
   - name: UAT_WORKSPACE_NAME
     value: ${{ parameters.UAT_WORKSPACE_NAME }}
+  - name: UAT_ONELAKE_ENDPOINT
+    value: ${{ parameters.UAT_ONELAKE_ENDPOINT }}
 
 jobs:
   - job: Release
@@ -3637,6 +3642,7 @@ jobs:
     steps:
       - checkout: none
 
+      # Keep the working download task
       - task: DownloadBuildArtifacts@0
         displayName: "Download Build Artifacts"
         inputs:
@@ -3647,12 +3653,14 @@ jobs:
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
+      # Install Dependencies
       - task: PowerShell@2
         displayName: '=== Installing Dependencies ==='
         inputs:
           pwsh: true
           targetType: inline
           script: |
+            Write-Host "Installing required modules..."
             Install-Module -Name Az.Accounts -Force -Scope CurrentUser -AllowClobber
             Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
 
@@ -3669,6 +3677,7 @@ jobs:
               Invoke-WebRequest -Uri $_ -OutFile $destPath
             }
 
+      # Promote to UAT
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
@@ -3676,181 +3685,118 @@ jobs:
           CLIENT_ID: $(clinetid)
           TENANT_ID: $(tenantid)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+          UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
         inputs:
           pwsh: true
           targetType: inline
           script: |
             try {
+                # Import modules
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
-                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
 
-                # Authentication
+                # Credentials setup
                 $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                # Connect to services
+                Write-Host "=== Authenticating to Services ==="
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+                
+                # Service Principal Authentication
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-
-                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
                 Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                # Get workspace
                 Write-Host "=== Getting Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
                     throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
                 }
                 $workspaceId = $workspaceObj.Id
+                Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                # Function to process and validate PBISM content
-                function Get-ValidatedPBISMContent {
-                    param($filePath)
+                # Function to import semantic model
+                function Import-SemanticModel {
+                    param($modelPath, $workspaceId)
+                    Write-Host "Importing semantic model from: $modelPath"
                     try {
-                        $content = Get-Content $filePath -Raw
-                        $json = $content | ConvertFrom-Json
-                        
-                        # Basic validation of required properties
-                        if (-not $json.version -or -not $json.name) {
-                            throw "Invalid PBISM structure: missing required properties"
-                        }
-                        
-                        return $content
+                        $smItem = Import-FabricItem -workspaceId $workspaceId -path $modelPath
+                        Write-Host "Semantic model imported successfully"
+                        return $smItem
                     }
                     catch {
-                        Write-Error "Invalid PBISM file content: $_"
-                        return $null
+                        Write-Error "Failed to import semantic model: $_"
+                        throw
                     }
                 }
 
-                # Function to safely get model files
-                function Get-ModelFiles {
-                    param($folderPath)
-                    $files = @{}
-                    try {
-                        $pbismPath = Join-Path $folderPath "definition.pbism"
-                        if (Test-Path $pbismPath) {
-                            $pbismContent = Get-ValidatedPBISMContent $pbismPath
-                            if ($pbismContent) {
-                                $files["pbism"] = $pbismContent
-                            }
-                        }
-                        return $files
-                    }
-                    catch {
-                        Write-Error "Error getting model files: $_"
-                        return $null
-                    }
-                }
-
-                # Find all model folders
+                # Define artifact root path
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-                Write-Host "Searching in: $artifactRoot"
+                Write-Host "Artifact root path: $artifactRoot"
 
-                # First, process semantic models
-                Write-Host "`n=== Processing Semantic Models ==="
-                $modelFolders = Get-ChildItem -Path $artifactRoot -Recurse -Directory | 
-                    Where-Object { Test-Path (Join-Path $_.FullName "definition.pbism") }
+                # Find all semantic models and reports
+                $smFiles = Get-ChildItem -Path $artifactRoot -Include "*.pbism" -Recurse
+                $reportFiles = Get-ChildItem -Path $artifactRoot -Include "*.pbir" -Recurse
+
+                Write-Host "Found $($smFiles.Count) semantic model(s)"
+                Write-Host "Found $($reportFiles.Count) report(s)"
 
                 $importedModels = @{}
 
-                foreach ($modelFolder in $modelFolders) {
-                    $modelName = $modelFolder.Name
-                    Write-Host "`nProcessing model: $modelName from $($modelFolder.FullName)"
-
-                    try {
-                        $modelFiles = Get-ModelFiles $modelFolder.FullName
-                        if (-not $modelFiles) {
-                            Write-Warning "Skipping model $modelName - invalid files"
+                # Import semantic models
+                if ($smFiles) {
+                    Write-Host "`n=== Importing Semantic Models ==="
+                    foreach ($smFile in $smFiles) {
+                        $modelFolder = $smFile.Directory
+                        Write-Host "Processing model from: $($modelFolder.FullName)"
+                        
+                        try {
+                            $modelResult = Import-SemanticModel -modelPath $modelFolder.FullName -workspaceId $workspaceId
+                            if ($modelResult) {
+                                $importedModels[$modelFolder.FullName] = $modelResult.id
+                                Write-Host "Successfully imported model with ID: $($modelResult.id)"
+                            }
+                        }
+                        catch {
+                            Write-Error "Failed to import model: $_"
                             continue
                         }
-
-                        # Prepare model request body
-                        $modelContent = $modelFiles["pbism"]
-                        Write-Host "Model content loaded successfully"
-
-                        # Custom Import using REST API
-                        $token = Get-FabricAuthToken
-                        $headers = @{
-                            'Authorization' = "Bearer $token"
-                            'Content-Type' = 'application/json'
-                        }
-
-                        $modelBody = @{
-                            displayName = $modelName
-                            definition = $modelContent
-                        } | ConvertTo-Json -Depth 100 -Compress
-
-                        Write-Host "Importing semantic model..."
-                        $importUri = "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/semanticmodels"
-                        
-                        $response = Invoke-RestMethod `
-                            -Uri $importUri `
-                            -Method Post `
-                            -Headers $headers `
-                            -Body $modelBody `
-                            -ContentType "application/json; charset=utf-8"
-
-                        if ($response.id) {
-                            $importedModels[$modelFolder.FullName] = $response.id
-                            Write-Host "Successfully imported model: $modelName with ID: $($response.id)"
-                        }
-                    }
-                    catch {
-                        Write-Error "Failed to import model $modelName`: $_"
-                        continue
                     }
                 }
 
-                # Process reports
-                Write-Host "`n=== Processing Reports ==="
-                $reportFolders = Get-ChildItem -Path $artifactRoot -Recurse -Directory | 
-                    Where-Object { Test-Path (Join-Path $_.FullName "definition.pbir") }
+                # Import reports
+                if ($reportFiles) {
+                    Write-Host "`n=== Importing Reports ==="
+                    foreach ($reportFile in $reportFiles) {
+                        $reportFolder = $reportFile.Directory
+                        Write-Host "Processing report from: $($reportFolder.FullName)"
 
-                foreach ($reportFolder in $reportFolders) {
-                    $reportName = $reportFolder.Name
-                    Write-Host "`nProcessing report: $reportName"
-
-                    try {
-                        $modelId = $importedModels[$reportFolder.FullName]
-                        if (-not $modelId) {
-                            Write-Warning "No semantic model found for report: $reportName"
+                        try {
+                            # Get the associated model ID
+                            $modelId = $importedModels[$reportFolder.FullName]
+                            
+                            if ($modelId) {
+                                Write-Host "Using model ID: $modelId"
+                                $reportResult = Import-FabricItem -workspaceId $workspaceId -path $reportFolder.FullName -itemProperties @{
+                                    semanticModelId = $modelId
+                                }
+                                Write-Host "Successfully imported report"
+                            }
+                            else {
+                                Write-Warning "No semantic model found for report in: $($reportFolder.FullName)"
+                            }
+                        }
+                        catch {
+                            Write-Error "Failed to import report: $_"
                             continue
                         }
-
-                        $pbirPath = Join-Path $reportFolder.FullName "definition.pbir"
-                        $reportContent = Get-Content $pbirPath -Raw
-
-                        $reportBody = @{
-                            displayName = $reportName
-                            definition = $reportContent
-                            semanticModelId = $modelId
-                        } | ConvertTo-Json -Depth 100 -Compress
-
-                        $token = Get-FabricAuthToken
-                        $headers = @{
-                            'Authorization' = "Bearer $token"
-                            'Content-Type' = 'application/json'
-                        }
-
-                        $importUri = "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/reports"
-                        
-                        $response = Invoke-RestMethod `
-                            -Uri $importUri `
-                            -Method Post `
-                            -Headers $headers `
-                            -Body $reportBody `
-                            -ContentType "application/json; charset=utf-8"
-
-                        Write-Host "Successfully imported report: $reportName"
-                    }
-                    catch {
-                        Write-Error "Failed to import report $reportName`: $_"
-                        continue
                     }
                 }
+
+                Write-Host "`nAll changes imported successfully."
+                Write-Host "Pipeline completed successfully."
 
             }
             catch {
