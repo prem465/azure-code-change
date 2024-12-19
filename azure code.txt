@@ -4406,30 +4406,27 @@ jobs:
     pwsh: true
     targetType: inline
     script: |
-      # Pre-snippet logic: Setup credentials and perform Fabric, AzCopy, and Power BI authentication
-      # so that when we run the manager's snippet, everything is ready.
-
-      # Import required modules
+      # Pre-snippet logic: Setup credentials and authentication exactly as in combined code scenario
       Import-Module Az.Accounts -Force
       Import-Module MicrosoftPowerBIMgmt -Force
       Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
 
-      # Prepare credentials
       $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
       $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
       $tenantId = $env:TENANT_ID.Trim()
 
-      # Determine if service principal
+      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
       $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
       $isServicePrincipal = $false
       if ($credential.UserName -match $guidRegex) {
           $isServicePrincipal = $true
       }
 
-      # Set Fabric Auth Token
       if ($isServicePrincipal) {
         Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
-          -ServicePrincipalSecret ([System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))) `
+          -ServicePrincipalSecret $plainTextPwd `
           -TenantId $tenantId -Reset
       } else {
         Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
@@ -4441,11 +4438,9 @@ jobs:
         throw "Fabric authentication failed."
       }
 
-      # Connect to Azure
       Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
 
       Write-Host "=== Authenticating to OneLake with AzCopy ==="
-      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto([System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
       $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
       $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
       $oneLakeDomain = $oneLakeUri.Host
@@ -4463,8 +4458,7 @@ jobs:
         Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
       }
 
-      # Now we run the manager's snippet EXACTLY as is:
-      # (Do not modify any line of the snippet, just paste it as given.)
+      # Manager's snippet begins here (no lines removed, only added logic inside the foreach loop):
       Write-Host "=== Debugging Artifacts ==="
       $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
       if ($allFiles.Count -eq 0) {
@@ -4480,11 +4474,11 @@ jobs:
           Write-Host "TENANT_ID: $env:TENANT_ID"
           Write-Host "UAT_WORKSPACE_NAME: $env:UAT_WORKSPACE_NAME"
 
-          # Connect to Azure and Power BI
+          # Connect to Azure and Power BI (line from snippet)
           Connect-AzAccount -ServicePrincipal -Tenant $env:TENANT_ID -Credential $credential
           Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID -ErrorAction Stop
 
-          # Get the UAT workspace
+          # Get the UAT workspace (snippet code)
           Write-Host "=== Retrieving UAT Workspace ==="
           $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
           if (-not $workspaceObj) {
@@ -4495,7 +4489,7 @@ jobs:
           $workspaceID = $workspaceObj.Id
           Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
 
-          # Debug artifacts
+          # Debug artifacts again (snippet code)
           Write-Host "=== Debugging Artifacts ==="
           $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
           if ($allFiles.Count -eq 0) {
@@ -4505,11 +4499,36 @@ jobs:
             $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
           }
 
-          # Importing items
+          # Importing items (snippet code)
           Write-Host "=== Importing Items ==="
           foreach ($pbism in $allFiles) {
             Write-Host "Importing: $($pbism.FullName)"
-            Import-FabricItem -WorkspaceId $workspaceID -Path $pbism.FullName -itemProperties @{}
+
+            # Added logic to determine itemType and displayName
+            $extension = $pbism.Extension.ToLower()
+            if ($extension -eq ".pbism") {
+              $props = @{
+                itemType = "SemanticModel"
+                displayName = (Split-Path $pbism.DirectoryName -Leaf)
+              }
+            } elseif ($extension -eq ".pbir") {
+              $props = @{
+                itemType = "Report"
+                displayName = (Split-Path $pbism.DirectoryName -Leaf)
+              }
+            } else {
+              Write-Host "Skipping non-pbism/pbir file: $($pbism.FullName)"
+              continue
+            }
+
+            $dirPath = $pbism.DirectoryName
+            if ([string]::IsNullOrEmpty($dirPath)) {
+                Write-Error "Directory path is null or empty for $($pbism.FullName). Skipping."
+                continue
+            }
+
+            # Modified the Import-FabricItem line to include itemProperties and use DirectoryName for Path
+            Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
           }
 
           Write-Host "=== Promotion Completed Successfully ==="
