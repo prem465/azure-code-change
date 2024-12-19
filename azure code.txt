@@ -3647,7 +3647,7 @@ jobs:
         inputs:
           buildType: 'specific'
           project: '$(System.TeamProjectId)'
-          definition: 'Power-BI-(CI)'    # EXACT name of your CI pipeline
+          definition: 'Power-BI-(CI)'
           buildVersionToDownload: 'latest'
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
@@ -3696,28 +3696,62 @@ jobs:
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                Write-Host "Authenticating..."
+                Write-Host "=== Authenticating ==="
                 $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
 
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
                 Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-                Write-Host "Listing artifact directory:"
-                ls $artifactRoot -Recurse
+                # Find artifacts
+                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
+                Write-Host "`nArtifact root path: $artifactRoot"
 
-                $smPath = Join-Path $artifactRoot "SemanticModels/definition.pbism"
-                $rptPath = Join-Path $artifactRoot "Reports/definition.pbir"
+                Write-Host "`n=== Listing Artifact Contents ==="
+                Get-ChildItem -Path $artifactRoot -Recurse | ForEach-Object {
+                    Write-Host $_.FullName
+                }
 
-                Write-Host "Checking for definition files:"
-                Write-Host "Semantic model definition file: $smPath Exists? $(Test-Path $smPath)"
-                Write-Host "Report definition file: $rptPath Exists? $(Test-Path $rptPath)"
+                # Function to find all semantic models
+                function Find-SemanticModels {
+                    param($rootPath)
+                    return @(Get-ChildItem -Path $rootPath -Recurse -Filter "*.pbism")
+                }
 
-                $smExists = Test-Path $smPath
-                $rptExists = Test-Path $rptPath
+                # Function to find reports
+                function Find-Reports {
+                    param($rootPath)
+                    return @(Get-ChildItem -Path $rootPath -Recurse -Filter "*.pbir")
+                }
 
-                Write-Host "=== Retrieving UAT Workspace ==="
+                # Function to import item
+                function Import-FabricItemWithLogging {
+                    param(
+                        $workspaceId,
+                        $itemPath,
+                        $itemType,
+                        $properties = $null
+                    )
+                    Write-Host "Importing $itemType from: $itemPath"
+                    try {
+                        $params = @{
+                            workspaceId = $workspaceId
+                            path = $itemPath
+                        }
+                        if ($properties) {
+                            $params.itemProperties = $properties
+                        }
+                        $result = Import-FabricItem @params
+                        Write-Host "Successfully imported $itemType. ID: $($result.id)"
+                        return $result
+                    }
+                    catch {
+                        Write-Error "Failed to import $itemType from $itemPath`: $_"
+                        throw
+                    }
+                }
+
+                Write-Host "`n=== Getting Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
                     throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
@@ -3725,29 +3759,75 @@ jobs:
                 $workspaceId = $workspaceObj.Id
                 Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                function ImportItem($path, $workspaceId) {
-                    Write-Host "Importing item from: $path"
-                    $item = Import-FabricItem -workspaceId $workspaceId -path $path
-                    Write-Host "Item imported successfully. ID: $($item.id)"
-                    return $item
+                # Find all files
+                $semanticModels = Find-SemanticModels -rootPath $artifactRoot
+                $reports = Find-Reports -rootPath $artifactRoot
+
+                Write-Host "`nFound $($semanticModels.Count) semantic model(s)"
+                Write-Host "Found $($reports.Count) report(s)"
+
+                if ($semanticModels.Count -eq 0 -and $reports.Count -eq 0) {
+                    Write-Host "No files found to process. Check artifact structure."
+                    exit 0
                 }
 
-                # Import semantic model if present
-                if ($smExists) {
-                    Write-Host "Importing Semantic Model from $smPath"
-                    $smFolder = Split-Path $smPath -Parent
-                    $modelItem = ImportItem -path $smFolder -workspaceId $workspaceId
+                # Dictionary to store imported models
+                $importedModels = @{}
+
+                # Import semantic models first
+                foreach ($model in $semanticModels) {
+                    Write-Host "`n=== Processing Semantic Model ==="
+                    $modelFolder = $model.Directory
+                    $modelName = $modelFolder.Name
+                    
+                    try {
+                        $result = Import-FabricItemWithLogging -workspaceId $workspaceId -itemPath $modelFolder.FullName -itemType "semantic model"
+                        if ($result) {
+                            $importedModels[$modelFolder.FullName] = $result.id
+                            Write-Host "Semantic model imported with ID: $($result.id)"
+                        }
+                    }
+                    catch {
+                        Write-Error "Failed to import semantic model from $($modelFolder.FullName): $_"
+                        continue
+                    }
                 }
 
-                # Import report if present
-                if ($rptExists) {
-                    Write-Host "Importing Report from $rptPath"
-                    $rptFolder = Split-Path $rptPath -Parent
-                    $reportItem = ImportItem -path $rptFolder -workspaceId $workspaceId
+                # Import reports and link to models
+                foreach ($report in $reports) {
+                    Write-Host "`n=== Processing Report ==="
+                    $reportFolder = $report.Directory
+                    $reportName = $reportFolder.Name
+
+                    # Look for associated model
+                    $modelId = $importedModels[$reportFolder.FullName]
+                    if ($modelId) {
+                        try {
+                            $result = Import-FabricItemWithLogging `
+                                -workspaceId $workspaceId `
+                                -itemPath $reportFolder.FullName `
+                                -itemType "report" `
+                                -properties @{ semanticModelId = $modelId }
+                            Write-Host "Report imported successfully"
+                        }
+                        catch {
+                            Write-Error "Failed to import report from $($reportFolder.FullName): $_"
+                            continue
+                        }
+                    }
+                    else {
+                        Write-Warning "No semantic model found for report: $reportName"
+                    }
                 }
 
-                Write-Host "All items imported successfully."
-            } catch {
+                Write-Host "`n=== Deployment Summary ==="
+                Write-Host "Successfully processed:"
+                Write-Host "- $($importedModels.Count) semantic models"
+                Write-Host "- $($reports.Count) reports"
+
+            }
+            catch {
                 Write-Error "Deployment failed: $_"
+                Write-Error $_.ScriptStackTrace
                 throw
             }
