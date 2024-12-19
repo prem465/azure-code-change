@@ -3621,7 +3621,6 @@ parameters:
   - name: UAT_WORKSPACE_NAME
     type: string
     default: 'YourUATWorkspaceName'
-
   - name: UAT_ONELAKE_ENDPOINT
     type: string
     default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
@@ -3638,8 +3637,7 @@ variables:
 
 jobs:
   - job: Release
-    displayName: "CD Pipeline - Push Artifacts to UAT"
-
+    displayName: "CD Pipeline - Promote Artifacts to UAT"
     steps:
       - checkout: none
 
@@ -3704,22 +3702,16 @@ jobs:
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
                 Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
-                if (-not $workspaceObj) {
-                    throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
-                }
-                $workspaceId = $workspaceObj.Id
-                Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
-
                 $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-                if (!(Test-Path $artifactRoot)) {
-                    Write-Host "No artifacts found; exiting."
-                    exit 0
-                }
+                Write-Host "Listing artifact directory:"
+                ls $artifactRoot -Recurse
 
-                # We have definition.pbism in SemanticModels and definition.pbir in Reports
-                $smPath = Join-Path $artifactRoot "SemanticModels\definition.pbism"
-                $rptPath = Join-Path $artifactRoot "Reports\definition.pbir"
+                $smPath = Join-Path $artifactRoot "SemanticModels/definition.pbism"
+                $rptPath = Join-Path $artifactRoot "Reports/definition.pbir"
+
+                Write-Host "Checking for definition files:"
+                Write-Host "Semantic model definition file: $smPath Exists? $(Test-Path $smPath)"
+                Write-Host "Report definition file: $rptPath Exists? $(Test-Path $rptPath)"
 
                 $smExists = Test-Path $smPath
                 $rptExists = Test-Path $rptPath
@@ -3729,50 +3721,43 @@ jobs:
                     exit 0
                 }
 
-                function Import-SemanticModel($modelFolder, $workspaceId) {
-                    Write-Host "Importing semantic model from: $modelFolder"
-                    # Use folder name "SemanticModels" as displayName or customize
-                    $folderName = "ImportedModel"
-                    $smItem = Import-FabricItem -workspaceId $workspaceId -path $modelFolder -itemProperties @{
-                      displayName = $folderName
-                      itemType    = "semanticModel"
-                    }
-                    Write-Host "Semantic model imported successfully with ID: $($smItem.id)"
-                    return $smItem
+                Write-Host "=== Retrieving UAT Workspace ==="
+                $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
+                if (-not $workspaceObj) {
+                    throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
                 }
+                $workspaceId = $workspaceObj.Id
+                Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                function Import-Report($reportFolder, $workspaceId, $semanticModelId) {
-                    Write-Host "Importing report from: $reportFolder"
-                    $folderName = "ImportedReport"
-                    Import-FabricItem -workspaceId $workspaceId -path $reportFolder -itemProperties @{
-                      displayName     = $folderName
-                      itemType        = "report"
-                      semanticModelId = $semanticModelId
-                    } | Out-Null
-                    Write-Host "Report imported successfully."
+                function ImportItem($path, $workspaceId, $properties = $null) {
+                    Write-Host "Importing item from: $path"
+                    $item = Import-FabricItem -workspaceId $workspaceId -path $path -itemProperties $properties
+                    Write-Host "Item imported successfully. ID: $($item.id)"
+                    return $item
                 }
 
                 $semanticModelId = $null
 
-                # If semantic model is present, import it
+                # If definition.pbism exists, import semantic model directory
                 if ($smExists) {
-                    # Semantic model folder is SemanticModels, so we pass that folder path
                     $smFolder = Split-Path $smPath -Parent
-                    $modelImported = Import-SemanticModel $smFolder $workspaceId
-                    $semanticModelId = $modelImported.id
+                    # Just import the folder. definition.pbism should define displayName and itemType
+                    $smItem = ImportItem $smFolder $workspaceId
+                    $semanticModelId = $smItem.id
                 }
 
-                # If report is present, import it
+                # If definition.pbir exists, import report directory
                 if ($rptExists) {
                     $rptFolder = Split-Path $rptPath -Parent
                     if (-not $semanticModelId) {
-                        # We must have a model for the report
-                        # If definition.pbir is present but no pbism in semanticmodels?
-                        # According to your scenario, we have a pbism in semantic models
-                        # If not, we can't import report
-                        throw "Cannot import report without a semantic model. Make sure definition.pbism is also present."
+                        # If no semantic model imported, we need a model. If your scenario requires a model,
+                        # ensure CI pipeline also includes the model in artifact. If not, we can't import report.
+                        Write-Warning "No semantic model imported before report. Ensure definition.pbism is also present."
+                        # If your scenario says we must have model, throw error
+                        throw "Cannot import report without semantic model."
                     }
-                    Import-Report $rptFolder $workspaceId $semanticModelId
+                    # Import report with semanticModelId
+                    $rptItem = ImportItem $rptFolder $workspaceId @{ semanticModelId = $semanticModelId }
                 }
 
                 Write-Host "All changes imported successfully."
