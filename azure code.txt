@@ -3653,6 +3653,29 @@ jobs:
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
       - task: PowerShell@2
+        displayName: '=== Installing Dependencies ==='
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            Write-Host "Installing required modules..."
+            Install-Module -Name Az.Accounts -Force -Scope CurrentUser -AllowClobber
+            Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
+
+            if (-not (Test-Path ".\.nuget\custom_modules")) {
+              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force | Out-Null
+            }
+
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              $fileName = Split-Path $_ -Leaf
+              $destPath = Join-Path ".\.nuget\custom_modules" $fileName
+              Invoke-WebRequest -Uri $_ -OutFile $destPath
+            }
+
+      - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
           CLIENT_SECRET: $(clientsecret)
@@ -3665,7 +3688,7 @@ jobs:
           targetType: inline
           script: |
             try {
-                # Import required modules
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
                 Import-Module Az.Accounts -Force
                 Import-Module MicrosoftPowerBIMgmt -Force
 
@@ -3673,53 +3696,58 @@ jobs:
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
-                Write-Host "Authenticating to services..."
+                Write-Host "Authenticating..."
+                $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+
                 Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
+                Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-                Write-Host "Retrieving UAT workspace..."
+                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+                Write-Host "Listing artifact directory:"
+                ls $artifactRoot -Recurse
+
+                $smPath = Join-Path $artifactRoot "SemanticModels/definition.pbism"
+                $rptPath = Join-Path $artifactRoot "Reports/definition.pbir"
+
+                Write-Host "Checking for definition files:"
+                Write-Host "Semantic model definition file: $smPath Exists? $(Test-Path $smPath)"
+                Write-Host "Report definition file: $rptPath Exists? $(Test-Path $rptPath)"
+
+                $smExists = Test-Path $smPath
+                $rptExists = Test-Path $rptPath
+
+                Write-Host "=== Retrieving UAT Workspace ==="
                 $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
                 if (-not $workspaceObj) {
                     throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
                 }
                 $workspaceId = $workspaceObj.Id
-                Write-Host "Workspace found: $($workspaceObj.Name) with ID $workspaceId"
+                Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-                # Define artifact paths
-                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-                $semanticModelPath = Join-Path $artifactRoot "SemanticModels"
-                $reportPath = Join-Path $artifactRoot "Reports"
-
-                # Promote Semantic Models
-                if (Test-Path $semanticModelPath) {
-                    Write-Host "Promoting Semantic Models from $semanticModelPath"
-                    try {
-                        $smItem = Import-FabricItem -workspaceId $workspaceId -path $semanticModelPath
-                        Write-Host "Semantic Model imported successfully with ID: $($smItem.id)"
-                    } catch {
-                        Write-Error "Failed to import Semantic Model: $_"
-                        throw
-                    }
-                } else {
-                    Write-Host "No Semantic Models found to promote."
+                function ImportItem($path, $workspaceId) {
+                    Write-Host "Importing item from: $path"
+                    $item = Import-FabricItem -workspaceId $workspaceId -path $path
+                    Write-Host "Item imported successfully. ID: $($item.id)"
+                    return $item
                 }
 
-                # Promote Reports
-                if (Test-Path $reportPath) {
-                    Write-Host "Promoting Reports from $reportPath"
-                    try {
-                        $reportItem = Import-FabricItem -workspaceId $workspaceId -path $reportPath
-                        Write-Host "Report imported successfully with ID: $($reportItem.id)"
-                    } catch {
-                        Write-Error "Failed to import Report: $_"
-                        throw
-                    }
-                } else {
-                    Write-Host "No Reports found to promote."
+                # Import semantic model if present
+                if ($smExists) {
+                    Write-Host "Importing Semantic Model from $smPath"
+                    $smFolder = Split-Path $smPath -Parent
+                    $modelItem = ImportItem -path $smFolder -workspaceId $workspaceId
                 }
 
-                Write-Host "Promotion completed successfully."
+                # Import report if present
+                if ($rptExists) {
+                    Write-Host "Importing Report from $rptPath"
+                    $rptFolder = Split-Path $rptPath -Parent
+                    $reportItem = ImportItem -path $rptFolder -workspaceId $workspaceId
+                }
+
+                Write-Host "All items imported successfully."
             } catch {
-                Write-Error "An error occurred during promotion: $_"
+                Write-Error "Deployment failed: $_"
                 throw
             }
