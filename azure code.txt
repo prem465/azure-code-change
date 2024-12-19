@@ -4186,184 +4186,201 @@ jobs:
             Write-Host "Modules installed successfully"
 
       - task: PowerShell@2
-        displayName: '=== Promoting Items to UAT ==='
-        env:
-          CLIENT_SECRET: $(clientsecret)
-          CLIENT_ID: $(clinetid)
-          TENANT_ID: $(tenantid)
-          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
-          UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
-        inputs:
-          pwsh: true
-          targetType: inline
-          script: |
-            try {
-                # Import modules
-                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-                Import-Module Az.Accounts -Force
-                Import-Module MicrosoftPowerBIMgmt -Force
+  displayName: '=== Promoting Items to UAT ==='
+  env:
+    CLIENT_SECRET: $(clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+          # Import modules
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
 
-                # Credentials setup
-                $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
-                $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
-                $tenantId = $env:TENANT_ID.Trim()
+          # Credentials setup
+          $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+          $tenantId = $env:TENANT_ID.Trim()
 
-                Write-Host "=== Authenticating to Fabric ==="
-                $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
-                $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
-                
-                # Determine if service principal
-                $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-                $isServicePrincipal = $false
-                if ($credential.UserName -match $guidRegex) {
-                  $isServicePrincipal = $true
-                }
+          Write-Host "=== Authenticating to Fabric ==="
+          $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+          
+          # Determine if service principal
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
+          if ($credential.UserName -match $guidRegex) {
+            $isServicePrincipal = $true
+          }
 
-                if ($isServicePrincipal) {
-                  Set-FabricAuthToken -servicePrincipalId $credential.UserName `
-                    -servicePrincipalSecret $plainTextPwd `
-                    -tenantId $tenantId -reset
-                } else {
-                  Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
-                }
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+              -servicePrincipalSecret $plainTextPwd `
+              -tenantId $tenantId -reset
+          } else {
+            Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+          }
 
-                $authToken = Get-FabricAuthToken
-                if (-not $authToken) {
-                  Write-Error "Authentication to Fabric failed."
-                  throw "Fabric authentication failed."
-                }
+          $authToken = Get-FabricAuthToken
+          if (-not $authToken) {
+            Write-Error "Authentication to Fabric failed."
+            throw "Fabric authentication failed."
+          }
 
-                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
 
-                Write-Host "=== Authenticating to OneLake with AzCopy ==="
-                $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-                $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
-                $oneLakeDomain = $oneLakeUri.Host
-                $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
-                $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
-                if (!$checkResult) {
-                  Write-Error "AzCopy authentication failed."
-                  throw "AzCopy login failed."
-                }
+          Write-Host "=== Authenticating to OneLake with AzCopy ==="
+          $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+          $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+          $oneLakeDomain = $oneLakeUri.Host
+          $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
+          $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+          if (!$checkResult) {
+            Write-Error "AzCopy authentication failed."
+            throw "AzCopy login failed."
+          }
 
-                Write-Host "=== Connecting to Power BI Service ==="
-                if ($isServicePrincipal) {
-                  Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
-                } else {
-                  Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
-                }
+          Write-Host "=== Connecting to Power BI Service ==="
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          }
 
-                Write-Host "=== Retrieving UAT Workspace ==="
-                $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
-                if (-not $workspaceObj) {
-                    Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
-                    throw "Workspace not found."
-                }
-                $workspaceID = $workspaceObj.Id
+          Write-Host "=== Retrieving UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+          if (-not $workspaceObj) {
+              Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
+              throw "Workspace not found."
+          }
+          $workspaceID = $workspaceObj.Id
 
-                # Set the root directory where artifacts are located
-                $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-                Write-Host "Artifacts root: $downloadRoot"
+          # Set the root directory where artifacts are located
+          $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+          Write-Host "Artifacts root: $downloadRoot"
 
-                # Find semantic model and report files
-                $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
-                $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
+          # Find semantic model and report files
+          $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
+          $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
 
-                if ($allPbismFiles.Count -eq 0 -and $allPbirFiles.Count -eq 0) {
-                    Write-Host "No semantic model or report files found in artifacts. Nothing to promote."
-                    exit 0
-                }
+          if ($allPbismFiles.Count -eq 0 -and $allPbirFiles.Count -eq 0) {
+              Write-Host "No semantic model or report files found in artifacts. Nothing to promote."
+              exit 0
+          }
 
-                function Import-SemanticModel([string]$modelFolderPath, [string]$workspaceID) {
-                    Write-Host ("Importing semantic model from {0}" -f $modelFolderPath)
-                    try {
-                        $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolderPath
-                        Write-Host "Semantic model imported successfully: $($smItem.displayName)"
-                        return $smItem
-                    } catch {
-                        Write-Error ("Failed to import semantic model at {0}: {1}" -f $modelFolderPath, $_)
-                        throw
-                    }
-                }
+          function Import-SemanticModel([string]$modelFolderPath, [string]$workspaceID) {
+              # Find the pbism file in this folder
+              $pbismFile = Get-ChildItem -Path $modelFolderPath -Filter "*.pbism" -File -Recurse | Select-Object -First 1
+              if (-not $pbismFile) {
+                  Write-Error ("No .pbism file found in folder {0}" -f $modelFolderPath)
+                  throw "Semantic model definition not found."
+              }
 
-                # Import semantic models
-                Write-Host "`n=== Importing Semantic Models ==="
-                $importedModels = [System.Collections.Generic.Dictionary[string,object]]::new()
-                foreach ($modelFile in $allPbismFiles) {
-                    # The folder containing the pbism is considered the model folder
-                    $modelFolder = $modelFile.DirectoryName
+              $definition = Get-Content $pbismFile.FullName -Raw
+              $modelName = Split-Path $modelFolderPath -Leaf
+              Write-Host ("Importing semantic model '{0}' from {1}" -f $modelName, $modelFolderPath)
 
-                    # Avoid re-importing the same model folder multiple times if multiple pbism files are present
-                    if ($importedModels.ContainsKey($modelFolder)) {
-                        continue
-                    }
+              try {
+                  $smItem = Import-FabricItem -workspaceId $workspaceID -itemType SemanticModel -displayName $modelName -definition $definition
+                  Write-Host "Semantic model imported successfully: $($smItem.displayName)"
+                  return $smItem
+              } catch {
+                  Write-Error ("Failed to import semantic model at {0}: {1}" -f $modelFolderPath, $_)
+                  throw
+              }
+          }
 
-                    $smImported = Import-SemanticModel $modelFolder $workspaceID
-                    if ($smImported) {
-                        # Key by the folder path so we can match later
-                        $importedModels.Add($modelFolder, $smImported)
-                    }
-                }
+          function Import-Report([string]$reportFolder, [string]$workspaceID, $semanticModelId = $null) {
+              $reportName = Split-Path $reportFolder -Leaf
+              
+              # definition.pbir should contain the report definition
+              $definitionFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
+              if ($definitionFile) {
+                  $reportDefinition = Get-Content $definitionFile.FullName -Raw
+              } else {
+                  # If there's no definition file, try using a *.pbir file directly as definition
+                  $pbirFile = Get-ChildItem -Path $reportFolder -Filter "*.pbir" -File -Recurse | Where-Object { $_.Name -ne "definition.pbir" } | Select-Object -First 1
+                  if (-not $pbirFile) {
+                      Write-Error ("No report definition found in {0}" -f $reportFolder)
+                      throw "Report definition not found."
+                  }
+                  $reportDefinition = Get-Content $pbirFile.FullName -Raw
+              }
 
-                # Import reports
-                Write-Host "`n=== Importing Reports ==="
-                if ($allPbirFiles.Count -gt 0) {
-                    foreach ($reportFile in $allPbirFiles) {
-                        $reportFolder = $reportFile.DirectoryName
-                        Write-Host "Processing report from folder: $reportFolder"
+              Write-Host ("Importing report '{0}' from {1}" -f $reportName, $reportFolder)
+              $itemProps = $null
+              if ($semanticModelId) {
+                  $itemProps = @{ semanticModelId = $semanticModelId }
+              }
 
-                        # Check if there's a definition file to find the semantic model path. 
-                        # Adjust if your structure differs.
-                        $definitionFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
-                        if (-not $definitionFile) {
-                            Write-Host "No definition.pbir found in $reportFolder, attempting to just import as is."
-                            # If no definition, we assume the folder itself is a standalone report definition.
-                            # If your scenario requires a definition file, raise an error.
-                            $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $reportFolder
-                            Write-Host "Report imported successfully."
-                            continue
-                        }
+              try {
+                  $promotedItem = Import-FabricItem -workspaceId $workspaceID -itemType Report -displayName $reportName -definition $reportDefinition -itemProperties $itemProps
+                  Write-Host "Report imported successfully: $($promotedItem.displayName)"
+              } catch {
+                  Write-Error ("Failed to import report at {0}: {1}" -f $reportFolder, $_)
+                  throw
+              }
+          }
 
-                        # Parse report definition to find associated semantic model path if needed
-                        $reportDefinition = (Get-Content $definitionFile.FullName -Raw) | ConvertFrom-Json
-                        $semanticModelRef = $reportDefinition?.datasetReference?.byPath?.path
-                        if ($semanticModelRef -and $semanticModelRef -ne "") {
-                            # Combine folder paths - the semantic model might be relative
-                            $smFullPath = Join-Path $reportFolder $semanticModelRef
+          # Import semantic models
+          Write-Host "`n=== Importing Semantic Models ==="
+          $importedModels = [System.Collections.Generic.Dictionary[string,object]]::new()
+          foreach ($modelFile in $allPbismFiles) {
+              $modelFolder = $modelFile.DirectoryName
+              if (-not $importedModels.ContainsKey($modelFolder)) {
+                  $smImported = Import-SemanticModel $modelFolder $workspaceID
+                  if ($smImported) {
+                      $importedModels[$modelFolder] = $smImported
+                  }
+              }
+          }
 
-                            # Locate the pbism file in that referenced directory (or above)
-                            $pbismRefFile = Get-ChildItem -Path $smFullPath -Filter "*.pbism" -Recurse -ErrorAction SilentlyContinue
-                            if ($pbismRefFile -ne $null) {
-                                $smFolderForReport = $pbismRefFile.DirectoryName
-                                # Re-import semantic model in case we need the latest model ID
-                                $smImportedForReport = Import-SemanticModel $smFolderForReport $workspaceID
-                                $semanticModelId = $smImportedForReport.id
+          # Import reports
+          Write-Host "`n=== Importing Reports ==="
+          if ($allPbirFiles.Count -gt 0) {
+              foreach ($reportFile in $allPbirFiles) {
+                  # Each reportFile is a .pbir file
+                  $reportFolder = $reportFile.DirectoryName
+                  
+                  # Attempt to find a semantic model reference from definition.pbir if present
+                  $definitionFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
+                  $semanticModelId = $null
+                  if ($definitionFile) {
+                      $reportDef = (Get-Content $definitionFile.FullName -Raw) | ConvertFrom-Json
+                      $semanticModelRef = $reportDef?.datasetReference?.byPath?.path
+                      if ($semanticModelRef) {
+                          # semanticModelRef is a relative path. Combine with reportFolder
+                          $smFullPath = Join-Path $reportFolder $semanticModelRef
+                          $pbismRefFile = Get-ChildItem -Path $smFullPath -Filter "*.pbism" -Recurse -ErrorAction SilentlyContinue
+                          if ($pbismRefFile) {
+                              $smFolderForReport = $pbismRefFile.DirectoryName
+                              # Import/Refresh semantic model for the report
+                              $smImportedForReport = Import-SemanticModel $smFolderForReport $workspaceID
+                              $semanticModelId = $smImportedForReport.id
+                          }
+                      }
+                  }
 
-                                Write-Host ("Importing report at {0} linked to semantic model ID: {1}" -f $reportFolder, $semanticModelId)
-                                $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $reportFolder -itemProperties @{ semanticModelId = $semanticModelId }
-                                Write-Host "Report imported successfully."
-                            } else {
-                                Write-Host "No pbism file found for the referenced semantic model. Attempting to import report alone."
-                                $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $reportFolder
-                                Write-Host "Report imported successfully (no linked semantic model)."
-                            }
-                        } else {
-                            # If there's no semantic model reference, just import the report
-                            $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $reportFolder
-                            Write-Host "Report imported successfully (no linked semantic model)."
-                        }
-                    }
-                } else {
-                    Write-Host "No reports found."
-                }
+                  # Import the report now that we potentially have a semantic model ID
+                  Import-Report $reportFolder $workspaceID $semanticModelId
+              }
+          } else {
+              Write-Host "No reports found."
+          }
 
-                Write-Host "`n=== Deployment Summary ==="
-                Write-Host "Semantic models imported: $($importedModels.Count)"
-                Write-Host "Reports imported: $($allPbirFiles.Count)"
-                Write-Host "Deployment completed successfully."
+          Write-Host "`n=== Deployment Summary ==="
+          Write-Host "Semantic models imported: $($importedModels.Count)"
+          Write-Host "Reports imported: $($allPbirFiles.Count)"
+          Write-Host "Deployment completed successfully."
 
-            } catch {
-                $err = $_
-                Write-Error ("An error occurred: {0}" -f $err)
-                throw $err
-            }
+      } catch {
+          $err = $_
+          Write-Error ("An error occurred: {0}" -f $err)
+          throw $err
+      }
