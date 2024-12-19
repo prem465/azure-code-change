@@ -4401,6 +4401,7 @@ jobs:
     CLIENT_ID: $(clinetid)
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
   inputs:
     pwsh: true
     targetType: inline
@@ -4429,11 +4430,11 @@ jobs:
 
           # Set Fabric Auth Token
           if ($isServicePrincipal) {
-              Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
-                -ServicePrincipalSecret $plainTextPwd `
-                -TenantId $tenantId -Reset
+            Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
+              -ServicePrincipalSecret $plainTextPwd `
+              -TenantId $tenantId -Reset
           } else {
-              Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
+            Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
           }
 
           $authToken = Get-FabricAuthToken
@@ -4442,9 +4443,26 @@ jobs:
             throw "Fabric authentication failed."
           }
 
-          # Connect to Azure and Power BI
+          # Connect to Azure
           Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
-          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+
+          Write-Host "=== Authenticating to OneLake with AzCopy ==="
+          $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+          $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+          $oneLakeDomain = $oneLakeUri.Host
+          $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
+          $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+          if (!$checkResult) {
+            Write-Error "AzCopy authentication failed."
+            throw "AzCopy login failed."
+          }
+
+          Write-Host "=== Connecting to Power BI Service ==="
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          }
 
           # Get the UAT workspace
           Write-Host "=== Retrieving UAT Workspace ==="
@@ -4475,6 +4493,7 @@ jobs:
               $modelFolder = $pbism.DirectoryName
               $modelName = Split-Path $modelFolder -Leaf
               Write-Host "Importing Semantic Model from: $modelFolder"
+              # Rely on Import-FabricItem's internal logic to parse pbism
               Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -itemProperties @{
                   itemType = "SemanticModel"
                   displayName = $modelName
@@ -4486,6 +4505,7 @@ jobs:
               $reportFolder = $pbir.DirectoryName
               $reportName = Split-Path $reportFolder -Leaf
               Write-Host "Importing Report from: $reportFolder"
+              # Rely on Import-FabricItem's internal logic to parse pbir
               Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
                   itemType = "Report"
                   displayName = $reportName
@@ -4494,6 +4514,7 @@ jobs:
 
           Write-Host "`n=== Promotion Completed Successfully ==="
       } catch {
-          Write-Error "An error occurred: $($_.Exception.Message)"
+          $err = $_
+          Write-Error ("An error occurred: {0}" -f $err)
           throw
       }
