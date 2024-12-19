@@ -3896,6 +3896,38 @@ jobs:
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
+      # Install Dependencies with fixed module installation
+      - task: PowerShell@2
+        displayName: '=== Installing Dependencies ==='
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            Write-Host "Setting up PowerShell environment..."
+            Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+
+            Write-Host "Installing required modules..."
+            # Install Az module first
+            Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser -Repository PSGallery
+            Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser -Repository PSGallery
+
+            # Create directory for custom modules
+            if (-not (Test-Path ".\.nuget\custom_modules")) {
+              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force | Out-Null
+            }
+
+            # Download Fabric modules
+            @(
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
+              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
+            ) | ForEach-Object {
+              $fileName = Split-Path $_ -Leaf
+              $destPath = Join-Path ".\.nuget\custom_modules" $fileName
+              Invoke-WebRequest -Uri $_ -OutFile $destPath
+            }
+
+            Write-Host "Modules installed successfully"
+
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
@@ -3908,21 +3940,25 @@ jobs:
           targetType: inline
           script: |
             try {
+                Write-Host "Importing required modules..."
+                Import-Module Az.Accounts -Force -ErrorAction Stop
+                Import-Module MicrosoftPowerBIMgmt -Force -ErrorAction Stop
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psd1" -Force -ErrorAction Stop
+
                 # Authentication setup
                 $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
                 $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
                 $tenantId = $env:TENANT_ID.Trim()
 
                 Write-Host "=== Authenticating ==="
-                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
-                
+                # Connect to Azure
+                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+                Write-Host "Azure connection successful"
+
                 # Get access token
-                $context = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile.DefaultContext
-                $token = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.AuthenticationFactory.Authenticate(
-                    $credential,
-                    [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AuthenticationTarget]::AADGraph,
-                    $tenantId
-                ).AccessToken
+                $context = Get-AzContext
+                $token = Get-AzAccessToken -ResourceUrl "https://api.fabric.microsoft.com"
+                $accessToken = $token.Token
 
                 # Function to make REST API calls
                 function Invoke-FabricAPI {
@@ -3933,14 +3969,15 @@ jobs:
                     )
                     
                     $headers = @{
-                        'Authorization' = "Bearer $token"
+                        'Authorization' = "Bearer $accessToken"
                         'Content-Type' = 'application/json'
                     }
                     
                     $uri = "https://api.fabric.microsoft.com/v1/$Endpoint"
+                    Write-Host "Calling $Method $uri"
                     
                     if ($Body) {
-                        $jsonBody = $Body | ConvertTo-Json -Depth 100
+                        $jsonBody = $Body | ConvertTo-Json -Depth 100 -Compress
                         $result = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $jsonBody
                     }
                     else {
@@ -3950,7 +3987,7 @@ jobs:
                     return $result
                 }
 
-                # Get workspace ID
+                # Get workspace
                 Write-Host "=== Getting Workspace ==="
                 $workspaces = Invoke-FabricAPI -Method GET -Endpoint "workspaces"
                 $workspace = $workspaces.value | Where-Object { $_.displayName -eq $env:UAT_WORKSPACE_NAME }
@@ -3961,22 +3998,27 @@ jobs:
                 $workspaceId = $workspace.id
                 Write-Host "Found workspace: $($workspace.displayName) ($workspaceId)"
 
-                # Define artifact paths
-                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
-                Write-Host "Artifact root path: $artifactRoot"
+                # Track imported models
+                $ImportedModels = @{}
 
                 # Process semantic models
                 Write-Host "`n=== Processing Semantic Models ==="
+                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
                 $semanticModelsPath = Join-Path $artifactRoot "SemanticModels"
+                
+                Write-Host "Looking for semantic models in: $semanticModelsPath"
                 if (Test-Path $semanticModelsPath) {
                     $modelFolders = Get-ChildItem -Path $semanticModelsPath -Directory
+                    Write-Host "Found $($modelFolders.Count) potential model folder(s)"
+                    
                     foreach ($modelFolder in $modelFolders) {
                         Write-Host "Processing model: $($modelFolder.Name)"
                         
                         $definitionFile = Join-Path $modelFolder.FullName "definition.pbism"
                         if (Test-Path $definitionFile) {
                             try {
-                                $modelContent = Get-Content $definitionFile -Raw | ConvertFrom-Json
+                                Write-Host "Reading model definition from: $definitionFile"
+                                $modelContent = Get-Content $definitionFile -Raw
                                 
                                 # Prepare request body
                                 $modelBody = @{
@@ -3991,33 +4033,42 @@ jobs:
                                     -Body $modelBody
                                 
                                 Write-Host "Successfully imported model: $($modelFolder.Name)"
-                                
-                                # Store model ID for reports
-                                $script:ImportedModels[$modelFolder.Name] = $modelResult.id
+                                $ImportedModels[$modelFolder.Name] = $modelResult.id
                             }
                             catch {
                                 Write-Error "Failed to import model $($modelFolder.Name): $_"
                                 continue
                             }
                         }
+                        else {
+                            Write-Warning "No definition.pbism found in $($modelFolder.FullName)"
+                        }
                     }
+                }
+                else {
+                    Write-Warning "SemanticModels directory not found at: $semanticModelsPath"
                 }
 
                 # Process reports
                 Write-Host "`n=== Processing Reports ==="
                 $reportsPath = Join-Path $artifactRoot "Reports"
+                
+                Write-Host "Looking for reports in: $reportsPath"
                 if (Test-Path $reportsPath) {
                     $reportFolders = Get-ChildItem -Path $reportsPath -Directory
+                    Write-Host "Found $($reportFolders.Count) potential report folder(s)"
+                    
                     foreach ($reportFolder in $reportFolders) {
                         Write-Host "Processing report: $($reportFolder.Name)"
                         
                         $definitionFile = Join-Path $reportFolder.FullName "definition.pbir"
                         if (Test-Path $definitionFile) {
                             try {
-                                $reportContent = Get-Content $definitionFile -Raw | ConvertFrom-Json
+                                Write-Host "Reading report definition from: $definitionFile"
+                                $reportContent = Get-Content $definitionFile -Raw
                                 
                                 # Get associated model ID
-                                $modelId = $script:ImportedModels[$reportFolder.Name]
+                                $modelId = $ImportedModels[$reportFolder.Name]
                                 if ($modelId) {
                                     # Prepare request body
                                     $reportBody = @{
@@ -4043,12 +4094,18 @@ jobs:
                                 continue
                             }
                         }
+                        else {
+                            Write-Warning "No definition.pbir found in $($reportFolder.FullName)"
+                        }
                     }
+                }
+                else {
+                    Write-Warning "Reports directory not found at: $reportsPath"
                 }
 
                 Write-Host "`n=== Deployment Summary ==="
                 Write-Host "Successfully processed:"
-                Write-Host "- $($script:ImportedModels.Count) semantic models"
+                Write-Host "- $($ImportedModels.Count) semantic models"
                 Write-Host "- $($reportFolders.Count) reports"
 
             }
