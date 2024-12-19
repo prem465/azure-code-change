@@ -4473,15 +4473,23 @@ jobs:
           Write-Host "`n=== Importing Semantic Models ==="
           foreach ($pbism in $allPbismFiles) {
               $modelFolder = $pbism.DirectoryName
+              $modelName = Split-Path $modelFolder -Leaf
               Write-Host "Importing Semantic Model from: $modelFolder"
-              Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder
+              Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -itemProperties @{
+                  itemType = "SemanticModel"
+                  displayName = $modelName
+              }
           }
 
           Write-Host "`n=== Importing Reports ==="
           foreach ($pbir in $allPbirFiles) {
               $reportFolder = $pbir.DirectoryName
+              $reportName = Split-Path $reportFolder -Leaf
               Write-Host "Importing Report from: $reportFolder"
-              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder
+              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
+                  itemType = "Report"
+                  displayName = $reportName
+              }
           }
 
           Write-Host "`n=== Promotion Completed Successfully ==="
