@@ -4406,37 +4406,62 @@ jobs:
     targetType: inline
     script: |
       try {
-          # Import modules
+          # Import required modules
           Import-Module Az.Accounts -Force
           Import-Module MicrosoftPowerBIMgmt -Force
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
 
-          # Credentials and authentication
+          # Credentials setup
           $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
           $tenantId = $env:TENANT_ID.Trim()
 
-          # Login to Azure
-          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
-          
-          # Get Fabric API token
-          $token = Get-AzAccessToken -ResourceUrl "https://api.fabric.microsoft.com"
-          $accessToken = $token.Token
+          Write-Host "=== Authenticating to Fabric ==="
+          $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
 
-          # Connect to Power BI
+          # Determine if service principal
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
+          if ($credential.UserName -match $guidRegex) {
+              $isServicePrincipal = $true
+          }
+
+          # Set Fabric Auth Token
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
+              -ServicePrincipalSecret $plainTextPwd `
+              -TenantId $tenantId -Reset
+          } else {
+            Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
+          }
+
+          $authToken = Get-FabricAuthToken
+          if (-not $authToken) {
+            Write-Error "Authentication to Fabric failed."
+            throw "Fabric authentication failed."
+          }
+
+          # Connect to Azure and Power BI
+          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
           Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
 
-          # Get the workspace ID
-          $workspaceList = Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces" `
-              -Headers @{ 'Authorization' = "Bearer $accessToken" } -Method GET
-          $workspaceObj = $workspaceList.value | Where-Object { $_.displayName -eq $env:UAT_WORKSPACE_NAME }
+          # Get the UAT workspace
+          Write-Host "=== Retrieving UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
           if (-not $workspaceObj) {
               Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
               throw "Workspace not found."
           }
-          $workspaceID = $workspaceObj.id
+
+          $workspaceID = $workspaceObj.Id
+          Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
 
           # Artifacts root
           $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+          Write-Host "Artifacts root: $downloadRoot"
+
+          # Get all pbism and pbir files
           $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
           $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
 
@@ -4445,54 +4470,23 @@ jobs:
               exit 0
           }
 
-          # Function to import a semantic model
-          function Import-SemanticModel($file) {
-              $definitionRaw = Get-Content $file.FullName -Raw
-              $definitionJson = $definitionRaw | ConvertFrom-Json
-              $modelName = Split-Path $file.DirectoryName -Leaf
-
-              $body = @{
-                  displayName = $modelName
-                  definition = $definitionJson
-              }
-
-              Write-Host "Importing Semantic Model: $modelName"
-              Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceID/semanticmodels" `
-                  -Method POST `
-                  -Headers @{ 'Authorization' = "Bearer $accessToken"; 'Content-Type' = 'application/json' } `
-                  -Body ($body | ConvertTo-Json -Depth 100)
-          }
-
-          # Function to import a report
-          function Import-Report($file) {
-              $definitionRaw = Get-Content $file.FullName -Raw
-              $definitionJson = $definitionRaw | ConvertFrom-Json
-              $reportName = Split-Path $file.DirectoryName -Leaf
-
-              $body = @{
-                  displayName = $reportName
-                  definition = $definitionJson
-              }
-
-              Write-Host "Importing Report: $reportName"
-              Invoke-RestMethod -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceID/reports" `
-                  -Method POST `
-                  -Headers @{ 'Authorization' = "Bearer $accessToken"; 'Content-Type' = 'application/json' } `
-                  -Body ($body | ConvertTo-Json -Depth 100)
-          }
-
-          # Import all semantic models
+          Write-Host "`n=== Importing Semantic Models ==="
           foreach ($pbism in $allPbismFiles) {
-              Import-SemanticModel $pbism
+              $modelFolder = $pbism.DirectoryName
+              Write-Host "Importing Semantic Model from: $modelFolder"
+              Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder
           }
 
-          # Import all reports
+          Write-Host "`n=== Importing Reports ==="
           foreach ($pbir in $allPbirFiles) {
-              Import-Report $pbir
+              $reportFolder = $pbir.DirectoryName
+              Write-Host "Importing Report from: $reportFolder"
+              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder
           }
 
-          Write-Host "=== Promotion Completed Successfully ==="
+          Write-Host "`n=== Promotion Completed Successfully ==="
       } catch {
-          Write-Error "An error occurred: $($_.Exception.Message)"
-          throw
+          $err = $_
+          Write-Error ("An error occurred: {0}" -f $err)
+          throw $err
       }
