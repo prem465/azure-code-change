@@ -4461,7 +4461,7 @@ jobs:
           $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
           Write-Host "Artifacts root: $downloadRoot"
 
-          # Find all pbism and pbir files
+          # Get all pbism and pbir files
           $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
           $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
 
@@ -4470,48 +4470,26 @@ jobs:
               exit 0
           }
 
-          # Function to import semantic models
-          function Import-SemanticModel($pbismFile) {
-              $modelFolder = $pbismFile.DirectoryName
+          Write-Host "`n=== Importing Semantic Models ==="
+          foreach ($pbism in $allPbismFiles) {
+              $modelFolder = $pbism.DirectoryName
               $modelName = Split-Path $modelFolder -Leaf
-
-              # Read definition
-              $definitionRaw = Get-Content $pbismFile.FullName -Raw
-              $definition = $definitionRaw | ConvertFrom-Json
-
+              Write-Host "Importing Semantic Model from: $modelFolder"
               Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -itemProperties @{
                   itemType = "SemanticModel"
                   displayName = $modelName
-                  definition = $definition
               }
-          }
-
-          # Function to import reports
-          function Import-Report($pbirFile) {
-              $reportFolder = $pbirFile.DirectoryName
-              $reportName = Split-Path $reportFolder -Leaf
-
-              # Read definition
-              $definitionRaw = Get-Content $pbirFile.FullName -Raw
-              $definition = $definitionRaw | ConvertFrom-Json
-
-              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
-                  itemType = "Report"
-                  displayName = $reportName
-                  definition = $definition
-              }
-          }
-
-          Write-Host "`n=== Importing Semantic Models ==="
-          foreach ($pbism in $allPbismFiles) {
-              Write-Host "Importing Semantic Model from: $($pbism.DirectoryName)"
-              Import-SemanticModel $pbism
           }
 
           Write-Host "`n=== Importing Reports ==="
           foreach ($pbir in $allPbirFiles) {
-              Write-Host "Importing Report from: $($pbir.DirectoryName)"
-              Import-Report $pbir
+              $reportFolder = $pbir.DirectoryName
+              $reportName = Split-Path $reportFolder -Leaf
+              Write-Host "Importing Report from: $reportFolder"
+              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
+                  itemType = "Report"
+                  displayName = $reportName
+              }
           }
 
           Write-Host "`n=== Promotion Completed Successfully ==="
