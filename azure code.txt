@@ -4406,10 +4406,10 @@ jobs:
     pwsh: true
     targetType: inline
     script: |
-      # Debugging Artifacts before try block
-      Write-Host "=== Debugging Artifacts ==="
+      # Debug artifacts before attempting imports
+      Write-Host "=== Debugging Artifacts in $(System.DefaultWorkingDirectory)/PowerBIArtifacts ==="
       $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
-      if ($allFiles.Count -eq 0) {
+      if (!$allFiles -or $allFiles.Count -eq 0) {
         Write-Error "No artifacts found in the directory."
         exit 1
       } else {
@@ -4421,6 +4421,12 @@ jobs:
           Write-Host "CLIENT_ID: $env:CLIENT_ID"
           Write-Host "TENANT_ID: $env:TENANT_ID"
           Write-Host "UAT_WORKSPACE_NAME: $env:UAT_WORKSPACE_NAME"
+          Write-Host "UAT_ONELAKE_ENDPOINT: $env:UAT_ONELAKE_ENDPOINT"
+
+          # Import required modules
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
 
           # Credentials setup
           $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
@@ -4428,10 +4434,6 @@ jobs:
           $tenantId = $env:TENANT_ID.Trim()
 
           Write-Host "=== Authenticating to Fabric ==="
-          Import-Module Az.Accounts -Force
-          Import-Module MicrosoftPowerBIMgmt -Force
-          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-
           $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
           $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
 
@@ -4488,37 +4490,50 @@ jobs:
           $workspaceID = $workspaceObj.Id
           Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
 
-          # Debug artifacts again (optional, to confirm nothing changed)
-          Write-Host "=== Debugging Artifacts ==="
+          # Re-list artifacts for confirmation
+          Write-Host "=== Final Artifact Listing ==="
           $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
           if ($allFiles.Count -eq 0) {
-            Write-Error "No artifacts found in the directory."
+            Write-Error "No artifacts found to promote."
             exit 1
           } else {
-            $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
+            $allFiles | ForEach-Object { Write-Host "Artifact: $($_.FullName)" }
           }
 
           Write-Host "=== Importing Items ==="
           foreach ($artifact in $allFiles) {
+              # Skip directories
+              if ($artifact.PSIsContainer) {
+                  Write-Host "Skipping directory: $($artifact.FullName)"
+                  continue
+              }
+
               $extension = $artifact.Extension.ToLower()
-              $folderName = Split-Path $artifact.DirectoryName -Leaf
-
-              # Determine itemType based on file extension
-              $props = @{
-                displayName = $folderName
-              }
-
               if ($extension -eq ".pbism") {
-                $props.itemType = "SemanticModel"
+                  $props = @{
+                      itemType = "SemanticModel"
+                      displayName = (Split-Path $artifact.DirectoryName -Leaf)
+                  }
               } elseif ($extension -eq ".pbir") {
-                $props.itemType = "Report"
+                  $props = @{
+                      itemType = "Report"
+                      displayName = (Split-Path $artifact.DirectoryName -Leaf)
+                  }
               } else {
-                Write-Host "Skipping non-pbism/pbir file: $($artifact.FullName)"
-                continue
+                  Write-Host "Skipping non-pbism/pbir file: $($artifact.FullName)"
+                  continue
               }
 
-              Write-Host "Importing: $($artifact.FullName) as $($props.itemType) with displayName $($props.displayName)"
-              Import-FabricItem -WorkspaceId $workspaceID -Path $artifact.FullName -itemProperties $props
+              $dirPath = $artifact.DirectoryName
+              if ([string]::IsNullOrEmpty($dirPath)) {
+                  Write-Error "Directory path is null or empty for $($artifact.FullName). Skipping."
+                  continue
+              }
+
+              Write-Host "Importing: $($artifact.FullName) as $($props.itemType), displayName=$($props.displayName)"
+              Write-Host "Directory used for import: $dirPath"
+              
+              Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
           }
 
           Write-Host "=== Promotion Completed Successfully ==="
