@@ -4185,7 +4185,7 @@ jobs:
 
             Write-Host "Modules installed successfully"
 
-      - task: PowerShell@2
+     - task: PowerShell@2
   displayName: '=== Promoting Items to UAT ==='
   env:
     CLIENT_SECRET: $(clientsecret)
@@ -4287,7 +4287,11 @@ jobs:
               Write-Host ("Importing semantic model '{0}' from {1}" -f $modelName, $modelFolderPath)
 
               try {
-                  $smItem = Import-FabricItem -workspaceId $workspaceID -itemType SemanticModel -displayName $modelName -definition $definition
+                  $smItem = Import-FabricItem -workspaceId $workspaceID -path $modelFolderPath -itemProperties @{
+                      itemType = "SemanticModel"
+                      displayName = $modelName
+                      definition = $definition
+                  }
                   Write-Host "Semantic model imported successfully: $($smItem.displayName)"
                   return $smItem
               } catch {
@@ -4299,12 +4303,13 @@ jobs:
           function Import-Report([string]$reportFolder, [string]$workspaceID, $semanticModelId = $null) {
               $reportName = Split-Path $reportFolder -Leaf
               
-              # definition.pbir should contain the report definition
+              # definition.pbir should contain the report definition if present
               $definitionFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
+              $reportDefinition = $null
               if ($definitionFile) {
                   $reportDefinition = Get-Content $definitionFile.FullName -Raw
               } else {
-                  # If there's no definition file, try using a *.pbir file directly as definition
+                  # If no definition file named definition.pbir, try any *.pbir file as the definition
                   $pbirFile = Get-ChildItem -Path $reportFolder -Filter "*.pbir" -File -Recurse | Where-Object { $_.Name -ne "definition.pbir" } | Select-Object -First 1
                   if (-not $pbirFile) {
                       Write-Error ("No report definition found in {0}" -f $reportFolder)
@@ -4314,13 +4319,17 @@ jobs:
               }
 
               Write-Host ("Importing report '{0}' from {1}" -f $reportName, $reportFolder)
-              $itemProps = $null
+              $itemProps = @{
+                  itemType = "Report"
+                  displayName = $reportName
+                  definition = $reportDefinition
+              }
               if ($semanticModelId) {
-                  $itemProps = @{ semanticModelId = $semanticModelId }
+                  $itemProps.Add("semanticModelId", $semanticModelId)
               }
 
               try {
-                  $promotedItem = Import-FabricItem -workspaceId $workspaceID -itemType Report -displayName $reportName -definition $reportDefinition -itemProperties $itemProps
+                  $promotedItem = Import-FabricItem -workspaceId $workspaceID -path $reportFolder -itemProperties $itemProps
                   Write-Host "Report imported successfully: $($promotedItem.displayName)"
               } catch {
                   Write-Error ("Failed to import report at {0}: {1}" -f $reportFolder, $_)
@@ -4345,9 +4354,7 @@ jobs:
           Write-Host "`n=== Importing Reports ==="
           if ($allPbirFiles.Count -gt 0) {
               foreach ($reportFile in $allPbirFiles) {
-                  # Each reportFile is a .pbir file
                   $reportFolder = $reportFile.DirectoryName
-                  
                   # Attempt to find a semantic model reference from definition.pbir if present
                   $definitionFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
                   $semanticModelId = $null
@@ -4355,7 +4362,7 @@ jobs:
                       $reportDef = (Get-Content $definitionFile.FullName -Raw) | ConvertFrom-Json
                       $semanticModelRef = $reportDef?.datasetReference?.byPath?.path
                       if ($semanticModelRef) {
-                          # semanticModelRef is a relative path. Combine with reportFolder
+                          # semanticModelRef is relative
                           $smFullPath = Join-Path $reportFolder $semanticModelRef
                           $pbismRefFile = Get-ChildItem -Path $smFullPath -Filter "*.pbism" -Recurse -ErrorAction SilentlyContinue
                           if ($pbismRefFile) {
@@ -4367,7 +4374,7 @@ jobs:
                       }
                   }
 
-                  # Import the report now that we potentially have a semantic model ID
+                  # Import the report now that we possibly have a semantic model ID
                   Import-Report $reportFolder $workspaceID $semanticModelId
               }
           } else {
