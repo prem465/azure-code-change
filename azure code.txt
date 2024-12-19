@@ -4406,10 +4406,10 @@ jobs:
     pwsh: true
     targetType: inline
     script: |
-      # Debug artifacts before attempting imports
-      Write-Host "=== Debugging Artifacts in $(System.DefaultWorkingDirectory)/PowerBIArtifacts ==="
+      # === Debugging Artifacts (Manager's initial snippet) ===
+      Write-Host "=== Debugging Artifacts ==="
       $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
-      if (!$allFiles -or $allFiles.Count -eq 0) {
+      if ($allFiles.Count -eq 0) {
         Write-Error "No artifacts found in the directory."
         exit 1
       } else {
@@ -4446,11 +4446,11 @@ jobs:
 
           # Set Fabric Auth Token
           if ($isServicePrincipal) {
-            Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
-              -ServicePrincipalSecret $plainTextPwd `
-              -TenantId $tenantId -Reset
+              Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
+                -ServicePrincipalSecret $plainTextPwd `
+                -TenantId $tenantId -Reset
           } else {
-            Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
+              Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
           }
 
           $authToken = Get-FabricAuthToken
@@ -4480,6 +4480,7 @@ jobs:
             Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
           }
 
+          # Get the UAT workspace
           Write-Host "=== Retrieving UAT Workspace ==="
           $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
           if (-not $workspaceObj) {
@@ -4490,14 +4491,14 @@ jobs:
           $workspaceID = $workspaceObj.Id
           Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
 
-          # Re-list artifacts for confirmation
-          Write-Host "=== Final Artifact Listing ==="
+          # Debug artifacts again (Manager snippet)
+          Write-Host "=== Debugging Artifacts ==="
           $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
           if ($allFiles.Count -eq 0) {
-            Write-Error "No artifacts found to promote."
+            Write-Error "No artifacts found in the directory."
             exit 1
           } else {
-            $allFiles | ForEach-Object { Write-Host "Artifact: $($_.FullName)" }
+            $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
           }
 
           Write-Host "=== Importing Items ==="
@@ -4532,7 +4533,7 @@ jobs:
 
               Write-Host "Importing: $($artifact.FullName) as $($props.itemType), displayName=$($props.displayName)"
               Write-Host "Directory used for import: $dirPath"
-              
+
               Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
           }
 
