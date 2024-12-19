@@ -4429,11 +4429,11 @@ jobs:
 
           # Set Fabric Auth Token
           if ($isServicePrincipal) {
-            Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
-              -ServicePrincipalSecret $plainTextPwd `
-              -TenantId $tenantId -Reset
+              Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
+                -ServicePrincipalSecret $plainTextPwd `
+                -TenantId $tenantId -Reset
           } else {
-            Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
+              Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
           }
 
           $authToken = Get-FabricAuthToken
@@ -4461,7 +4461,7 @@ jobs:
           $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
           Write-Host "Artifacts root: $downloadRoot"
 
-          # Get all pbism and pbir files
+          # Find all pbism and pbir files
           $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
           $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
 
@@ -4470,31 +4470,52 @@ jobs:
               exit 0
           }
 
-          Write-Host "`n=== Importing Semantic Models ==="
-          foreach ($pbism in $allPbismFiles) {
-              $modelFolder = $pbism.DirectoryName
+          # Function to import semantic models
+          function Import-SemanticModel($pbismFile) {
+              $modelFolder = $pbismFile.DirectoryName
               $modelName = Split-Path $modelFolder -Leaf
-              Write-Host "Importing Semantic Model from: $modelFolder"
+
+              # Read definition
+              $definitionRaw = Get-Content $pbismFile.FullName -Raw
+              $definition = $definitionRaw | ConvertFrom-Json
+
               Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -itemProperties @{
                   itemType = "SemanticModel"
                   displayName = $modelName
+                  definition = $definition
               }
+          }
+
+          # Function to import reports
+          function Import-Report($pbirFile) {
+              $reportFolder = $pbirFile.DirectoryName
+              $reportName = Split-Path $reportFolder -Leaf
+
+              # Read definition
+              $definitionRaw = Get-Content $pbirFile.FullName -Raw
+              $definition = $definitionRaw | ConvertFrom-Json
+
+              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
+                  itemType = "Report"
+                  displayName = $reportName
+                  definition = $definition
+              }
+          }
+
+          Write-Host "`n=== Importing Semantic Models ==="
+          foreach ($pbism in $allPbismFiles) {
+              Write-Host "Importing Semantic Model from: $($pbism.DirectoryName)"
+              Import-SemanticModel $pbism
           }
 
           Write-Host "`n=== Importing Reports ==="
           foreach ($pbir in $allPbirFiles) {
-              $reportFolder = $pbir.DirectoryName
-              $reportName = Split-Path $reportFolder -Leaf
-              Write-Host "Importing Report from: $reportFolder"
-              Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{
-                  itemType = "Report"
-                  displayName = $reportName
-              }
+              Write-Host "Importing Report from: $($pbir.DirectoryName)"
+              Import-Report $pbir
           }
 
           Write-Host "`n=== Promotion Completed Successfully ==="
       } catch {
-          $err = $_
-          Write-Error ("An error occurred: {0}" -f $err)
-          throw $err
+          Write-Error "An error occurred: $($_.Exception.Message)"
+          throw
       }
