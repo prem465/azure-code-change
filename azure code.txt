@@ -3675,6 +3675,8 @@ jobs:
               Invoke-WebRequest -Uri $_ -OutFile $destPath
             }
 
+      # ... (keep existing pipeline configuration until the PowerShell deployment task)
+
       - task: PowerShell@2
         displayName: '=== Promoting Items to UAT ==='
         env:
@@ -3724,25 +3726,34 @@ jobs:
                     return @(Get-ChildItem -Path $rootPath -Recurse -Filter "*.pbir")
                 }
 
-                # Function to import item
-                function Import-FabricItemWithLogging {
+                # Function to import item with required properties
+                function Import-FabricItemWithProperties {
                     param(
                         $workspaceId,
                         $itemPath,
                         $itemType,
-                        $properties = $null
+                        $displayName,
+                        $additionalProperties = @{}
                     )
-                    Write-Host "Importing $itemType from: $itemPath"
+                    Write-Host "Importing $itemType`: $displayName from: $itemPath"
                     try {
-                        $params = @{
-                            workspaceId = $workspaceId
-                            path = $itemPath
+                        # Combine required properties with any additional properties
+                        $properties = @{
+                            itemType = $itemType
+                            displayName = $displayName
                         }
-                        if ($properties) {
-                            $params.itemProperties = $properties
+                        foreach ($key in $additionalProperties.Keys) {
+                            $properties[$key] = $additionalProperties[$key]
                         }
-                        $result = Import-FabricItem @params
-                        Write-Host "Successfully imported $itemType. ID: $($result.id)"
+
+                        Write-Host "Import properties: $($properties | ConvertTo-Json)"
+                        
+                        $result = Import-FabricItem `
+                            -workspaceId $workspaceId `
+                            -path $itemPath `
+                            -itemProperties $properties
+
+                        Write-Host "Successfully imported $itemType`: $displayName. ID: $($result.id)"
                         return $result
                     }
                     catch {
@@ -3781,7 +3792,12 @@ jobs:
                     $modelName = $modelFolder.Name
                     
                     try {
-                        $result = Import-FabricItemWithLogging -workspaceId $workspaceId -itemPath $modelFolder.FullName -itemType "semantic model"
+                        $result = Import-FabricItemWithProperties `
+                            -workspaceId $workspaceId `
+                            -itemPath $modelFolder.FullName `
+                            -itemType "semanticModel" `
+                            -displayName $modelName
+
                         if ($result) {
                             $importedModels[$modelFolder.FullName] = $result.id
                             Write-Host "Semantic model imported with ID: $($result.id)"
@@ -3803,11 +3819,13 @@ jobs:
                     $modelId = $importedModels[$reportFolder.FullName]
                     if ($modelId) {
                         try {
-                            $result = Import-FabricItemWithLogging `
+                            $result = Import-FabricItemWithProperties `
                                 -workspaceId $workspaceId `
                                 -itemPath $reportFolder.FullName `
                                 -itemType "report" `
-                                -properties @{ semanticModelId = $modelId }
+                                -displayName $reportName `
+                                -additionalProperties @{ semanticModelId = $modelId }
+
                             Write-Host "Report imported successfully"
                         }
                         catch {
