@@ -4114,3 +4114,169 @@ jobs:
                 Write-Error $_.ScriptStackTrace
                 throw
             }
+
+-------------------------------------------
+
+
+# ... (keep existing pipeline configuration until the Promoting Items to UAT task)
+
+      - task: PowerShell@2
+        displayName: '=== Promoting Items to UAT ==='
+        env:
+          CLIENT_SECRET: $(clientsecret)
+          CLIENT_ID: $(clinetid)
+          TENANT_ID: $(tenantid)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                # Import modules and setup authentication as before...
+                Import-Module Az.Accounts -Force -ErrorAction Stop
+                Import-Module MicrosoftPowerBIMgmt -Force -ErrorAction Stop
+                Import-Module ".\.nuget\custom_modules\FabricPS-PBIP.psd1" -Force -ErrorAction Stop
+
+                # Authentication setup
+                $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+                $tenantId = $env:TENANT_ID.Trim()
+
+                Write-Host "=== Authenticating ==="
+                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+                Write-Host "Azure connection successful"
+
+                # Get access token
+                $token = Get-AzAccessToken -ResourceUrl "https://api.fabric.microsoft.com"
+                $accessToken = $token.Token
+
+                # First, let's examine the download location
+                Write-Host "`n=== Examining Artifact Structure ==="
+                $downloadRoot = "$(System.DefaultWorkingDirectory)"
+                Write-Host "Download root: $downloadRoot"
+                
+                Write-Host "`nListing all directories:"
+                Get-ChildItem -Path $downloadRoot -Directory -Recurse | ForEach-Object {
+                    Write-Host $_.FullName
+                }
+
+                Write-Host "`nListing all pbism files:"
+                $allPbismFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbism" -Recurse
+                $allPbismFiles | ForEach-Object {
+                    Write-Host $_.FullName
+                }
+
+                Write-Host "`nListing all pbir files:"
+                $allPbirFiles = Get-ChildItem -Path $downloadRoot -Filter "*.pbir" -Recurse
+                $allPbirFiles | ForEach-Object {
+                    Write-Host $_.FullName
+                }
+
+                # Get workspace
+                Write-Host "`n=== Getting Workspace ==="
+                $workspaces = Invoke-RestMethod `
+                    -Uri "https://api.fabric.microsoft.com/v1/workspaces" `
+                    -Headers @{
+                        'Authorization' = "Bearer $accessToken"
+                        'Content-Type' = 'application/json'
+                    } `
+                    -Method Get
+                
+                $workspace = $workspaces.value | Where-Object { $_.displayName -eq $env:UAT_WORKSPACE_NAME }
+                if (-not $workspace) {
+                    throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
+                }
+                $workspaceId = $workspace.id
+                Write-Host "Found workspace: $($workspace.displayName) ($workspaceId)"
+
+                # Track imported models
+                $ImportedModels = @{}
+
+                # Process semantic models
+                Write-Host "`n=== Processing Semantic Models ==="
+                foreach ($modelFile in $allPbismFiles) {
+                    $modelFolder = $modelFile.Directory
+                    $modelName = $modelFolder.Name
+                    Write-Host "Processing model: $modelName from $($modelFile.FullName)"
+
+                    try {
+                        $modelContent = Get-Content $modelFile.FullName -Raw
+                        
+                        # Prepare request body
+                        $modelBody = @{
+                            displayName = $modelName
+                            definition = $modelContent
+                        }
+                        
+                        # Import model
+                        $modelResult = Invoke-RestMethod `
+                            -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/semanticmodels" `
+                            -Method Post `
+                            -Headers @{
+                                'Authorization' = "Bearer $accessToken"
+                                'Content-Type' = 'application/json'
+                            } `
+                            -Body ($modelBody | ConvertTo-Json -Depth 100)
+                        
+                        Write-Host "Successfully imported model: $modelName"
+                        $ImportedModels[$modelFolder.FullName] = $modelResult.id
+                    }
+                    catch {
+                        Write-Error "Failed to import model $modelName`: $_"
+                        continue
+                    }
+                }
+
+                # Process reports
+                Write-Host "`n=== Processing Reports ==="
+                foreach ($reportFile in $allPbirFiles) {
+                    $reportFolder = $reportFile.Directory
+                    $reportName = $reportFolder.Name
+                    Write-Host "Processing report: $reportName from $($reportFile.FullName)"
+
+                    try {
+                        $reportContent = Get-Content $reportFile.FullName -Raw
+                        
+                        # Get associated model ID
+                        $modelId = $ImportedModels[$reportFolder.FullName]
+                        if ($modelId) {
+                            # Prepare request body
+                            $reportBody = @{
+                                displayName = $reportName
+                                definition = $reportContent
+                                semanticModelId = $modelId
+                            }
+                            
+                            # Import report
+                            $reportResult = Invoke-RestMethod `
+                                -Uri "https://api.fabric.microsoft.com/v1/workspaces/$workspaceId/reports" `
+                                -Method Post `
+                                -Headers @{
+                                    'Authorization' = "Bearer $accessToken"
+                                    'Content-Type' = 'application/json'
+                                } `
+                                -Body ($reportBody | ConvertTo-Json -Depth 100)
+                            
+                            Write-Host "Successfully imported report: $reportName"
+                        }
+                        else {
+                            Write-Warning "No matching semantic model found for report: $reportName"
+                        }
+                    }
+                    catch {
+                        Write-Error "Failed to import report $reportName`: $_"
+                        continue
+                    }
+                }
+
+                Write-Host "`n=== Deployment Summary ==="
+                Write-Host "Successfully processed:"
+                Write-Host "- $($ImportedModels.Count) semantic models"
+                Write-Host "- $($allPbirFiles.Count) reports"
+
+            }
+            catch {
+                Write-Error "Deployment failed: $_"
+                Write-Error $_.ScriptStackTrace
+                throw
+            }
