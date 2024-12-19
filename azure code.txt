@@ -3857,3 +3857,203 @@ jobs:
                 Write-Error $_.ScriptStackTrace
                 throw
             }
+----------------------------------------------------------------
+
+trigger: none
+
+parameters:
+  - name: UAT_WORKSPACE_NAME
+    type: string
+    default: 'YourUATWorkspaceName'
+  - name: UAT_ONELAKE_ENDPOINT
+    type: string
+    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: 'powerbi'
+  - name: UAT_WORKSPACE_NAME
+    value: ${{ parameters.UAT_WORKSPACE_NAME }}
+  - name: UAT_ONELAKE_ENDPOINT
+    value: ${{ parameters.UAT_ONELAKE_ENDPOINT }}
+
+jobs:
+  - job: Release
+    displayName: "CD Pipeline - Promote Artifacts to UAT"
+
+    steps:
+      - checkout: none
+
+      - task: DownloadBuildArtifacts@0
+        displayName: "Download Build Artifacts"
+        inputs:
+          buildType: 'specific'
+          project: '$(System.TeamProjectId)'
+          definition: 'Power-BI-(CI)'
+          buildVersionToDownload: 'latest'
+          artifactName: 'PowerBIArtifacts'
+          downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
+
+      - task: PowerShell@2
+        displayName: '=== Promoting Items to UAT ==='
+        env:
+          CLIENT_SECRET: $(clientsecret)
+          CLIENT_ID: $(clinetid)
+          TENANT_ID: $(tenantid)
+          UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+                # Authentication setup
+                $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+                $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+                $tenantId = $env:TENANT_ID.Trim()
+
+                Write-Host "=== Authenticating ==="
+                Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+                
+                # Get access token
+                $context = [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AzureRmProfileProvider]::Instance.Profile.DefaultContext
+                $token = [Microsoft.Azure.Commands.Common.Authentication.AzureSession]::Instance.AuthenticationFactory.Authenticate(
+                    $credential,
+                    [Microsoft.Azure.Commands.Common.Authentication.Abstractions.AuthenticationTarget]::AADGraph,
+                    $tenantId
+                ).AccessToken
+
+                # Function to make REST API calls
+                function Invoke-FabricAPI {
+                    param(
+                        [string]$Method,
+                        [string]$Endpoint,
+                        $Body
+                    )
+                    
+                    $headers = @{
+                        'Authorization' = "Bearer $token"
+                        'Content-Type' = 'application/json'
+                    }
+                    
+                    $uri = "https://api.fabric.microsoft.com/v1/$Endpoint"
+                    
+                    if ($Body) {
+                        $jsonBody = $Body | ConvertTo-Json -Depth 100
+                        $result = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers -Body $jsonBody
+                    }
+                    else {
+                        $result = Invoke-RestMethod -Uri $uri -Method $Method -Headers $headers
+                    }
+                    
+                    return $result
+                }
+
+                # Get workspace ID
+                Write-Host "=== Getting Workspace ==="
+                $workspaces = Invoke-FabricAPI -Method GET -Endpoint "workspaces"
+                $workspace = $workspaces.value | Where-Object { $_.displayName -eq $env:UAT_WORKSPACE_NAME }
+                
+                if (-not $workspace) {
+                    throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
+                }
+                $workspaceId = $workspace.id
+                Write-Host "Found workspace: $($workspace.displayName) ($workspaceId)"
+
+                # Define artifact paths
+                $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
+                Write-Host "Artifact root path: $artifactRoot"
+
+                # Process semantic models
+                Write-Host "`n=== Processing Semantic Models ==="
+                $semanticModelsPath = Join-Path $artifactRoot "SemanticModels"
+                if (Test-Path $semanticModelsPath) {
+                    $modelFolders = Get-ChildItem -Path $semanticModelsPath -Directory
+                    foreach ($modelFolder in $modelFolders) {
+                        Write-Host "Processing model: $($modelFolder.Name)"
+                        
+                        $definitionFile = Join-Path $modelFolder.FullName "definition.pbism"
+                        if (Test-Path $definitionFile) {
+                            try {
+                                $modelContent = Get-Content $definitionFile -Raw | ConvertFrom-Json
+                                
+                                # Prepare request body
+                                $modelBody = @{
+                                    displayName = $modelFolder.Name
+                                    definition = $modelContent
+                                }
+                                
+                                # Import model
+                                $modelResult = Invoke-FabricAPI `
+                                    -Method POST `
+                                    -Endpoint "workspaces/$workspaceId/semanticmodels" `
+                                    -Body $modelBody
+                                
+                                Write-Host "Successfully imported model: $($modelFolder.Name)"
+                                
+                                # Store model ID for reports
+                                $script:ImportedModels[$modelFolder.Name] = $modelResult.id
+                            }
+                            catch {
+                                Write-Error "Failed to import model $($modelFolder.Name): $_"
+                                continue
+                            }
+                        }
+                    }
+                }
+
+                # Process reports
+                Write-Host "`n=== Processing Reports ==="
+                $reportsPath = Join-Path $artifactRoot "Reports"
+                if (Test-Path $reportsPath) {
+                    $reportFolders = Get-ChildItem -Path $reportsPath -Directory
+                    foreach ($reportFolder in $reportFolders) {
+                        Write-Host "Processing report: $($reportFolder.Name)"
+                        
+                        $definitionFile = Join-Path $reportFolder.FullName "definition.pbir"
+                        if (Test-Path $definitionFile) {
+                            try {
+                                $reportContent = Get-Content $definitionFile -Raw | ConvertFrom-Json
+                                
+                                # Get associated model ID
+                                $modelId = $script:ImportedModels[$reportFolder.Name]
+                                if ($modelId) {
+                                    # Prepare request body
+                                    $reportBody = @{
+                                        displayName = $reportFolder.Name
+                                        definition = $reportContent
+                                        semanticModelId = $modelId
+                                    }
+                                    
+                                    # Import report
+                                    $reportResult = Invoke-FabricAPI `
+                                        -Method POST `
+                                        -Endpoint "workspaces/$workspaceId/reports" `
+                                        -Body $reportBody
+                                    
+                                    Write-Host "Successfully imported report: $($reportFolder.Name)"
+                                }
+                                else {
+                                    Write-Warning "No matching semantic model found for report: $($reportFolder.Name)"
+                                }
+                            }
+                            catch {
+                                Write-Error "Failed to import report $($reportFolder.Name): $_"
+                                continue
+                            }
+                        }
+                    }
+                }
+
+                Write-Host "`n=== Deployment Summary ==="
+                Write-Host "Successfully processed:"
+                Write-Host "- $($script:ImportedModels.Count) semantic models"
+                Write-Host "- $($reportFolders.Count) reports"
+
+            }
+            catch {
+                Write-Error "Deployment failed: $_"
+                Write-Error $_.ScriptStackTrace
+                throw
+            }
