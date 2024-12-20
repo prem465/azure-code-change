@@ -4395,7 +4395,7 @@ jobs:
 
 
 - task: PowerShell@2
-  displayName: "=== Promoting Items to UAT (with Detailed Logging) ==="
+  displayName: "=== Promote Artifacts to UAT (With Semantic Model ID Resolution & Detailed Logging) ==="
   env:
     CLIENT_SECRET: $(clientsecret)
     CLIENT_ID: $(clinetid)
@@ -4424,6 +4424,9 @@ jobs:
       $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
       $tenantId = $env:TENANT_ID.Trim()
 
+      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
       # Determine if service principal
       $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
       $isServicePrincipal = $false
@@ -4432,9 +4435,6 @@ jobs:
       }
 
       Write-Host "=== Authenticating to Fabric ==="
-      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
-      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
-
       if ($isServicePrincipal) {
         Write-Host "Using service principal for Fabric Auth"
         Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
@@ -4499,69 +4499,137 @@ jobs:
         $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
       }
 
-      Write-Host "=== Importing Items ==="
-      foreach ($artifact in $allFiles) {
-          # Skip directories
-          if ($artifact.PSIsContainer) {
-              Write-Host "Skipping directory: $($artifact.FullName)"
-              continue
-          }
+      # Separate semantic models and reports
+      $pbismFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbism" }
+      $pbirFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbir" }
 
-          $extension = $artifact.Extension.ToLower()
-          # Determine itemType and displayName
-          if ($extension -eq ".pbism") {
-              $props = @{
-                  itemType = "SemanticModel"
-                  displayName = (Split-Path $artifact.DirectoryName -Leaf)
-              }
-          } elseif ($extension -eq ".pbir") {
-              $props = @{
-                  itemType = "Report"
-                  displayName = (Split-Path $artifact.DirectoryName -Leaf)
-              }
-          } else {
-              Write-Host "Skipping non-pbism/pbir file: $($artifact.FullName)"
-              continue
-          }
+      # Dictionary to map model folders to model IDs
+      $semanticModels = [System.Collections.Generic.Dictionary[string, string]]::new()
 
-          $dirPath = $artifact.DirectoryName
+      Write-Host "=== Importing Semantic Models First ==="
+      foreach ($pbism in $pbismFiles) {
+          $dirPath = $pbism.DirectoryName
           if ([string]::IsNullOrEmpty($dirPath)) {
-              Write-Error "Directory path is null or empty for $($artifact.FullName). Skipping this artifact."
+              Write-Error "Directory path is null or empty for semantic model file $($pbism.FullName). Skipping."
               continue
           }
 
-          Write-Host "Attempting to import artifact:"
-          Write-Host "  File: $($artifact.FullName)"
+          $modelName = Split-Path $dirPath -Leaf
+          $props = @{
+              itemType = "SemanticModel"
+              displayName = $modelName
+          }
+
+          Write-Host "Importing Semantic Model:"
+          Write-Host "  File: $($pbism.FullName)"
           Write-Host "  Directory: $dirPath"
           Write-Host "  itemType: $($props.itemType)"
           Write-Host "  displayName: $($props.displayName)"
 
           try {
-              Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
-              Write-Host "Imported successfully: $($artifact.FullName)"
+              $result = Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
+              Write-Host "Imported semantic model: $modelName with ID: $($result.id)"
+              $semanticModels[$dirPath] = $result.id
           } catch {
-              Write-Host "=== Error Details ==="
-              Write-Host "Failed to import: $($artifact.FullName)"
+              Write-Host "=== Error Details (Semantic Model Import) ==="
+              Write-Host "Failed to import semantic model: $($pbism.FullName)"
               Write-Host "Exception Type: $($_.Exception.GetType().FullName)"
               Write-Host "Exception Message: $($_.Exception.Message)"
               Write-Host "Stack Trace: $($_.Exception.StackTrace)"
-
-              # If there's a response property, print it
               if ($_.Exception.Response) {
                   Write-Host "Response Content:"
                   $responseContent = $($_.Exception.Response | Out-String)
                   Write-Host $responseContent
               }
-
-              # Print inner exceptions if any
               if ($_.Exception.InnerException) {
                   Write-Host "Inner Exception:"
                   Write-Host "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)"
                   Write-Host "Inner Exception Message: $($_.Exception.InnerException.Message)"
                   Write-Host "Inner Exception StackTrace: $($_.Exception.InnerException.StackTrace)"
               }
+              throw
+          }
+      }
 
-              # Rethrow the error to fail the pipeline if desired
+      Write-Host "=== Importing Reports ==="
+      foreach ($pbir in $pbirFiles) {
+          $reportDirPath = $pbir.DirectoryName
+          if ([string]::IsNullOrEmpty($reportDirPath)) {
+              Write-Error "Directory path is null or empty for report file $($pbir.FullName). Skipping."
+              continue
+          }
+
+          $reportName = Split-Path $reportDirPath -Leaf
+          $props = @{
+              itemType = "Report"
+              displayName = $reportName
+          }
+
+          Write-Host "Importing Report:"
+          Write-Host "  File: $($pbir.FullName)"
+          Write-Host "  Directory: $reportDirPath"
+          Write-Host "  itemType: $($props.itemType)"
+          Write-Host "  displayName: $($props.displayName)"
+
+          # Attempt to find definition.pbir or parse the current pbir to identify semantic model reference
+          $definitionFile = Get-ChildItem -Path $reportDirPath -Filter "definition.pbir" -File -ErrorAction SilentlyContinue
+          if (-not $definitionFile) {
+              # If no definition.pbir, try using the same file or any .pbir as definition
+              # Just attempt to see if we can identify a datasetReference from the .pbir itself
+              $definitionFile = $pbir
+          }
+
+          if ($definitionFile) {
+              try {
+                  $definitionJson = (Get-Content $definitionFile.FullName -Raw) | ConvertFrom-Json
+                  $semanticModelRefPath = $definitionJson?.datasetReference?.byPath?.path
+                  if ($semanticModelRefPath) {
+                      # Resolve semantic model ID
+                      Write-Host "Report references semantic model by path: $semanticModelRefPath"
+                      $smFullPath = Join-Path $reportDirPath $semanticModelRefPath
+                      $pbismRef = Get-ChildItem -Path $smFullPath -Filter "*.pbism" -Recurse -ErrorAction SilentlyContinue
+                      if ($pbismRef) {
+                          # Find the semantic model ID we imported
+                          $modelDir = $pbismRef.DirectoryName
+                          if ($semanticModels.ContainsKey($modelDir)) {
+                              $modelId = $semanticModels[$modelDir]
+                              Write-Host "Resolved semantic model ID: $modelId for report $reportName"
+                              $props.Add("semanticModelId", $modelId)
+                          } else {
+                              Write-Host "No imported semantic model found for this report. The report might fail if a model is required."
+                          }
+                      } else {
+                          Write-Host "No pbism file found for the referenced semantic model path."
+                      }
+                  } else {
+                      Write-Host "No semantic model reference found in definition. The report may be standalone."
+                  }
+              } catch {
+                  Write-Host "Failed to parse definition file for report: $($definitionFile.FullName)"
+                  Write-Host "Proceeding without semantic model ID."
+              }
+          }
+
+          try {
+              Import-FabricItem -WorkspaceId $workspaceID -Path $reportDirPath -itemProperties $props
+              Write-Host "Imported report successfully: $reportName"
+          } catch {
+              Write-Host "=== Error Details (Report Import) ==="
+              Write-Host "Failed to import report: $($pbir.FullName)"
+              Write-Host "Exception Type: $($_.Exception.GetType().FullName)"
+              Write-Host "Exception Message: $($_.Exception.Message)"
+              Write-Host "Stack Trace: $($_.Exception.StackTrace)"
+              if ($_.Exception.Response) {
+                  Write-Host "Response Content:"
+                  $responseContent = $($_.Exception.Response | Out-String)
+                  Write-Host $responseContent
+              }
+              if ($_.Exception.InnerException) {
+                  Write-Host "Inner Exception:"
+                  Write-Host "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)"
+                  Write-Host "Inner Exception Message: $($_.Exception.InnerException.Message)"
+                  Write-Host "Inner Exception StackTrace: $($_.Exception.InnerException.StackTrace)"
+              }
               throw
           }
       }
