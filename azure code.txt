@@ -4395,7 +4395,7 @@ jobs:
 
 
 - task: PowerShell@2
-  displayName: "=== Promoting Items to UAT ==="
+  displayName: "=== Promoting Items to UAT (with Detailed Logging) ==="
   env:
     CLIENT_SECRET: $(clientsecret)
     CLIENT_ID: $(clinetid)
@@ -4406,39 +4406,56 @@ jobs:
     pwsh: true
     targetType: inline
     script: |
-      # Pre-snippet logic: Setup credentials and authentication exactly as in combined code scenario
+      Write-Host "=== Starting Promotion to UAT ==="
+
+      Write-Host "=== Environment Variables ==="
+      Write-Host "CLIENT_ID: $env:CLIENT_ID"
+      Write-Host "TENANT_ID: $env:TENANT_ID"
+      Write-Host "UAT_WORKSPACE_NAME: $env:UAT_WORKSPACE_NAME"
+      Write-Host "UAT_ONELAKE_ENDPOINT: $env:UAT_ONELAKE_ENDPOINT"
+
+      Write-Host "=== Loading Modules ==="
       Import-Module Az.Accounts -Force
       Import-Module MicrosoftPowerBIMgmt -Force
       Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
 
+      Write-Host "=== Setting Credentials ==="
       $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
       $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
       $tenantId = $env:TENANT_ID.Trim()
 
-      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
-      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
-
+      # Determine if service principal
       $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
       $isServicePrincipal = $false
       if ($credential.UserName -match $guidRegex) {
           $isServicePrincipal = $true
       }
 
+      Write-Host "=== Authenticating to Fabric ==="
+      $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+      $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
       if ($isServicePrincipal) {
+        Write-Host "Using service principal for Fabric Auth"
         Set-FabricAuthToken -ServicePrincipalId $credential.UserName `
           -ServicePrincipalSecret $plainTextPwd `
           -TenantId $tenantId -Reset
       } else {
+        Write-Host "Using user credential for Fabric Auth"
         Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
       }
 
       $authToken = Get-FabricAuthToken
       if (-not $authToken) {
-        Write-Error "Authentication to Fabric failed."
-        throw "Fabric authentication failed."
+        Write-Error "Fabric authentication failed."
+        exit 1
+      } else {
+        Write-Host "Fabric authentication successful."
       }
 
-      Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+      Write-Host "=== Connecting to Azure ==="
+      Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+      Write-Host "Azure connection successful."
 
       Write-Host "=== Authenticating to OneLake with AzCopy ==="
       $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
@@ -4448,7 +4465,9 @@ jobs:
       $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
       if (!$checkResult) {
         Write-Error "AzCopy authentication failed."
-        throw "AzCopy login failed."
+        exit 1
+      } else {
+        Write-Host "AzCopy authentication successful."
       }
 
       Write-Host "=== Connecting to Power BI Service ==="
@@ -4457,82 +4476,94 @@ jobs:
       } else {
         Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
       }
+      Write-Host "Power BI Service connection successful."
 
-      # Manager's snippet begins here (no lines removed, only added logic inside the foreach loop):
-      Write-Host "=== Debugging Artifacts ==="
-      $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
-      if ($allFiles.Count -eq 0) {
-         Write-Error "No artifacts found in the directory."
-         exit 1
+      Write-Host "=== Retrieving UAT Workspace ==="
+      $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
+      if (-not $workspaceObj) {
+          Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
+          exit 1
+      }
+
+      $workspaceID = $workspaceObj.Id
+      Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
+
+      Write-Host "=== Listing Artifacts ==="
+      $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+      Write-Host "Artifacts root: $downloadRoot"
+      $allFiles = Get-ChildItem -Path $downloadRoot -Recurse
+      if (!$allFiles -or $allFiles.Count -eq 0) {
+        Write-Error "No artifacts found in the directory."
+        exit 1
       } else {
-         $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
+        $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
       }
 
-      try {
-          Write-Host "=== Debugging Inputs ==="
-          Write-Host "CLIENT_ID: $env:CLIENT_ID"
-          Write-Host "TENANT_ID: $env:TENANT_ID"
-          Write-Host "UAT_WORKSPACE_NAME: $env:UAT_WORKSPACE_NAME"
-
-          # Connect to Azure and Power BI (line from snippet)
-          Connect-AzAccount -ServicePrincipal -Tenant $env:TENANT_ID -Credential $credential
-          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID -ErrorAction Stop
-
-          # Get the UAT workspace (snippet code)
-          Write-Host "=== Retrieving UAT Workspace ==="
-          $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
-          if (-not $workspaceObj) {
-            Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
-            throw "Workspace not found."
-          }
-
-          $workspaceID = $workspaceObj.Id
-          Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
-
-          # Debug artifacts again (snippet code)
-          Write-Host "=== Debugging Artifacts ==="
-          $allFiles = Get-ChildItem -Path "$(System.DefaultWorkingDirectory)/PowerBIArtifacts" -Recurse
-          if ($allFiles.Count -eq 0) {
-            Write-Error "No artifacts found in the directory."
-            exit 1
-          } else {
-            $allFiles | ForEach-Object { Write-Host "Found artifact: $($_.FullName)" }
-          }
-
-          # Importing items (snippet code)
-          Write-Host "=== Importing Items ==="
-          foreach ($pbism in $allFiles) {
-            Write-Host "Importing: $($pbism.FullName)"
-
-            # Added logic to determine itemType and displayName
-            $extension = $pbism.Extension.ToLower()
-            if ($extension -eq ".pbism") {
-              $props = @{
-                itemType = "SemanticModel"
-                displayName = (Split-Path $pbism.DirectoryName -Leaf)
-              }
-            } elseif ($extension -eq ".pbir") {
-              $props = @{
-                itemType = "Report"
-                displayName = (Split-Path $pbism.DirectoryName -Leaf)
-              }
-            } else {
-              Write-Host "Skipping non-pbism/pbir file: $($pbism.FullName)"
+      Write-Host "=== Importing Items ==="
+      foreach ($artifact in $allFiles) {
+          # Skip directories
+          if ($artifact.PSIsContainer) {
+              Write-Host "Skipping directory: $($artifact.FullName)"
               continue
-            }
-
-            $dirPath = $pbism.DirectoryName
-            if ([string]::IsNullOrEmpty($dirPath)) {
-                Write-Error "Directory path is null or empty for $($pbism.FullName). Skipping."
-                continue
-            }
-
-            # Modified the Import-FabricItem line to include itemProperties and use DirectoryName for Path
-            Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
           }
 
-          Write-Host "=== Promotion Completed Successfully ==="
-      } catch {
-          Write-Error "An error occurred: $($_.Exception.Message)"
-          throw
+          $extension = $artifact.Extension.ToLower()
+          # Determine itemType and displayName
+          if ($extension -eq ".pbism") {
+              $props = @{
+                  itemType = "SemanticModel"
+                  displayName = (Split-Path $artifact.DirectoryName -Leaf)
+              }
+          } elseif ($extension -eq ".pbir") {
+              $props = @{
+                  itemType = "Report"
+                  displayName = (Split-Path $artifact.DirectoryName -Leaf)
+              }
+          } else {
+              Write-Host "Skipping non-pbism/pbir file: $($artifact.FullName)"
+              continue
+          }
+
+          $dirPath = $artifact.DirectoryName
+          if ([string]::IsNullOrEmpty($dirPath)) {
+              Write-Error "Directory path is null or empty for $($artifact.FullName). Skipping this artifact."
+              continue
+          }
+
+          Write-Host "Attempting to import artifact:"
+          Write-Host "  File: $($artifact.FullName)"
+          Write-Host "  Directory: $dirPath"
+          Write-Host "  itemType: $($props.itemType)"
+          Write-Host "  displayName: $($props.displayName)"
+
+          try {
+              Import-FabricItem -WorkspaceId $workspaceID -Path $dirPath -itemProperties $props
+              Write-Host "Imported successfully: $($artifact.FullName)"
+          } catch {
+              Write-Host "=== Error Details ==="
+              Write-Host "Failed to import: $($artifact.FullName)"
+              Write-Host "Exception Type: $($_.Exception.GetType().FullName)"
+              Write-Host "Exception Message: $($_.Exception.Message)"
+              Write-Host "Stack Trace: $($_.Exception.StackTrace)"
+
+              # If there's a response property, print it
+              if ($_.Exception.Response) {
+                  Write-Host "Response Content:"
+                  $responseContent = $($_.Exception.Response | Out-String)
+                  Write-Host $responseContent
+              }
+
+              # Print inner exceptions if any
+              if ($_.Exception.InnerException) {
+                  Write-Host "Inner Exception:"
+                  Write-Host "Inner Exception Type: $($_.Exception.InnerException.GetType().FullName)"
+                  Write-Host "Inner Exception Message: $($_.Exception.InnerException.Message)"
+                  Write-Host "Inner Exception StackTrace: $($_.Exception.InnerException.StackTrace)"
+              }
+
+              # Rethrow the error to fail the pipeline if desired
+              throw
+          }
       }
+
+      Write-Host "=== Promotion Completed Successfully ==="
