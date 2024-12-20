@@ -4395,7 +4395,7 @@ jobs:
 
 
 - task: PowerShell@2
-  displayName: "=== Promote Artifacts to UAT (Replicating Combined Pipeline Logic) ==="
+  displayName: "=== Promote Artifacts to UAT (With itemType and displayName) ==="
   env:
     CLIENT_SECRET: "$(clientsecret)"
     CLIENT_ID: "$(clinetid)"
@@ -4471,7 +4471,6 @@ jobs:
               exit 0
           }
 
-          # Replicate combined logic: just import all semantic models and reports found.
           $pbismFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbism" }
           $pbirFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbir" }
 
@@ -4486,8 +4485,14 @@ jobs:
 
           function Import-SemanticModel($modelPath, $workspaceID) {
               Write-Host ("Importing semantic model from {0} into UAT workspace." -f $modelPath)
+              $modelName = Split-Path $modelPath -Leaf
+              $props = @{
+                itemType = "SemanticModel"
+                displayName = $modelName
+              }
+
               try {
-                  $smItem = Import-FabricItem -WorkspaceId $workspaceID -Path $modelPath
+                  $smItem = Import-FabricItem -WorkspaceId $workspaceID -Path $modelPath -itemProperties $props
                   Write-Host "Semantic model imported successfully."
                   return $smItem
               } catch {
@@ -4497,7 +4502,7 @@ jobs:
               }
           }
 
-          # Import all semantic models (like combined pipeline logic)
+          # Import all semantic models first
           Write-Host "=== Importing Semantic Models ==="
           foreach ($pbism in $pbismFiles) {
               $smFolder = $pbism.DirectoryName
@@ -4510,10 +4515,11 @@ jobs:
             exit 0
           }
 
-          # Import reports (replicate combined pipeline logic)
           Write-Host "=== Importing Reports ==="
           foreach ($pbir in $pbirFiles) {
               $reportFolder = $pbir.DirectoryName
+              $reportName = Split-Path $reportFolder -Leaf
+
               # Get report definition
               $def = Get-ChildItem -Path $reportFolder -Recurse -Include "definition.pbir"
               if ($def -eq $null) {
@@ -4535,17 +4541,25 @@ jobs:
                   throw "Semantic model .pbism not found."
               }
 
-              # Re-import the semantic model from the pbism folder (just like combined pipeline)
+              # Re-import the semantic model to get semanticModelId
               $reImportedSM = Import-SemanticModel $($pbismFile.DirectoryName) $workspaceID
               $semanticModelId = $reImportedSM.id
               if (-not $semanticModelId) {
-                  Write-Error ("Semantic Model not imported properly. Cannot import report.")
+                  Write-Error "Semantic Model not imported properly. Cannot import report."
                   throw "Semantic model for the report not found."
               }
 
               Write-Host ("Importing report at {0} to UAT workspace with semantic model ID: {1}" -f $reportFolder, $semanticModelId)
+
+              # itemType, displayName for the report
+              $reportProps = @{
+                itemType = "Report"
+                displayName = $reportName
+                semanticModelId = $semanticModelId
+              }
+
               try {
-                  $promotedItem = Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties @{ semanticModelId = $semanticModelId }
+                  $promotedItem = Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties $reportProps
                   Write-Host "Report imported successfully."
               } catch {
                   $err = $_
