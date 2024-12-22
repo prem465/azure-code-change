@@ -4487,7 +4487,7 @@ ___________________________________________________________________________
 CI
 ___________________________________________________
 trigger:
-- main  # or specify your desired branch
+- main
 
 pool:
   vmImage: 'windows-latest'
@@ -4539,7 +4539,6 @@ jobs:
       script: |
         Write-Host "=== [CI] Detecting PBISM and PBIR files via git diff ==="
 
-        # Example: comparing HEAD~1..HEAD. Adjust for your scenario if needed.
         $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
         $pbirChanges  = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
 
@@ -4552,10 +4551,9 @@ jobs:
         $pbirList  | ForEach-Object { Write-Host "- $_" }
 
         if (($pbismList.Count -eq 0) -and ($pbirList.Count -eq 0)) {
-          Write-Host "No PBISM/PBIR changes detected. (We will still publish an empty artifact.)"
+          Write-Host "No PBISM/PBIR changes detected."
         }
 
-        # Create a folder to store changed files
         $artifactFolder = "$(Build.SourcesDirectory)\ChangedArtifacts"
         if (-not (Test-Path $artifactFolder)) {
           New-Item -ItemType Directory -Path $artifactFolder | Out-Null
@@ -4585,6 +4583,7 @@ jobs:
         PathtoPublish: "$(Build.SourcesDirectory)\ChangedArtifacts"
         ArtifactName: "PowerBIArtifacts"
         publishLocation: "Container"
+
 
 ----------------------------------------------------------------
 CD
