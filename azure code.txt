@@ -4481,3 +4481,334 @@ jobs:
           Write-Error "An error occurred: $($_.Exception.Message)"
           throw
       }
+------------------------------------------------------------------------
+FINAL TRY
+___________________________________________________________________________
+CI
+___________________________________________________
+trigger:
+- main
+
+# CI pipeline that detects changed .pbism/.pbir, archives them, and publishes artifacts.
+
+pool:
+  vmImage: 'windows-latest'
+
+jobs:
+- job: BuildAndArchive
+  displayName: "CI - Build and Publish PBISM/PBIR Artifacts"
+
+  steps:
+    ########################################################################
+    # Step 1: Check out source code
+    ########################################################################
+    - checkout: self
+      persistCredentials: true
+
+    ########################################################################
+    # Step 2: Install Dependencies
+    ########################################################################
+    - task: PowerShell@2
+      displayName: "Install Dependencies (CI)"
+      inputs:
+        targetType: inline
+        pwsh: true
+      script: |
+        Write-Host "=== [CI] Setting up PowerShell environment ==="
+        Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
+
+        Write-Host "=== [CI] Installing Required Modules ==="
+        Install-Module Az -Scope CurrentUser -Force -AllowClobber
+        Install-Module MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
+
+        # (Optional) Install the FabricPS-PBIP module if needed
+        if (-not (Test-Path ".\.nuget\custom_modules")) {
+          New-Item -ItemType Directory -Path ".\.nuget\custom_modules" | Out-Null
+        }
+        $fabricModuleUrl = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1"
+        Invoke-WebRequest -Uri $fabricModuleUrl -OutFile ".\.nuget\custom_modules\FabricPS-PBIP.psm1"
+
+        Write-Host "=== [CI] Modules Installed ==="
+
+    ########################################################################
+    # Step 3: Detect & Copy Changed PBISM/PBIR Files
+    ########################################################################
+    - task: PowerShell@2
+      displayName: "Detect and Archive PBISM/PBIR Changes"
+      inputs:
+        pwsh: true
+        targetType: inline
+      script: |
+        Write-Host "=== [CI] Detecting PBISM and PBIR files via git diff ==="
+
+        # For demonstration, compare HEAD~1..HEAD. Adjust as needed.
+        $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
+        $pbirChanges  = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
+
+        $pbismList = $pbismChanges | Sort-Object -Unique
+        $pbirList  = $pbirChanges  | Sort-Object -Unique
+
+        Write-Host "PBISM changed files:"
+        $pbismList | ForEach-Object { Write-Host "- $_" }
+        Write-Host "PBIR changed files:"
+        $pbirList  | ForEach-Object { Write-Host "- $_" }
+
+        if (($pbismList.Count -eq 0) -and ($pbirList.Count -eq 0)) {
+          Write-Host "No PBISM/PBIR changes detected. (Will still publish an empty artifact.)"
+        }
+
+        # Create a folder to store changed files
+        $artifactFolder = "$(Build.SourcesDirectory)\ChangedArtifacts"
+        if (-not (Test-Path $artifactFolder)) {
+          New-Item -ItemType Directory -Path $artifactFolder | Out-Null
+        }
+
+        foreach ($file in $pbismList + $pbirList) {
+          $src = Join-Path "$(Build.SourcesDirectory)" $file
+          if (Test-Path $src) {
+            Write-Host "Copying file: $src"
+            $dest = Join-Path $artifactFolder $file
+            $destDir = Split-Path $dest -Parent
+            if (-not (Test-Path $destDir)) {
+              New-Item -ItemType Directory -Path $destDir | Out-Null
+            }
+            Copy-Item $src -Destination $dest
+          }
+        }
+
+        Write-Host "=== [CI] Files copied to artifact folder: $artifactFolder ==="
+
+    ########################################################################
+    # Step 4: Publish the Artifact
+    ########################################################################
+    - task: PublishBuildArtifacts@1
+      displayName: "Publish PBISM/PBIR Artifacts"
+      inputs:
+        PathtoPublish: "$(Build.SourcesDirectory)\ChangedArtifacts"
+        ArtifactName: "PowerBIArtifacts"
+        publishLocation: "Container"
+----------------------------------------------------------------
+CD
+______________________________________________________
+
+# This pipeline depends on artifacts from the CI pipeline above.
+# Adjust 'source: <CI-Pipeline-Name>' to match your actual CI pipeline's name.
+
+resources:
+  pipelines:
+  - pipeline: CI_Pipeline
+    source: "<YOUR-CI-PIPELINE-NAME>"
+    # You can specify:
+    # branch: main
+    # or trigger: true
+    # depending on how you want to link them
+
+trigger: none  # or customize how the CD pipeline is triggered
+
+stages:
+- stage: CD
+  displayName: "Promote Artifacts to UAT"
+  jobs:
+    - job: DeployToUAT
+      displayName: "CD - Import PBISM/PBIR to UAT Workspace"
+      pool:
+        vmImage: "windows-latest"
+
+      steps:
+      ########################################################################
+      # Step 1: Download Artifacts from the CI Pipeline
+      ########################################################################
+      - task: DownloadPipelineArtifact@2
+        displayName: "Download PBISM/PBIR Artifacts from CI"
+        inputs:
+          buildType: "specific"
+          project: "$(System.TeamProjectId)"
+          pipeline: "$(CI_Pipeline.pipelineId)"  # from the resources above
+          artifact: "PowerBIArtifacts"
+          path: "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+
+      ########################################################################
+      # Step 2: Install Dependencies (CD)
+      ########################################################################
+      - task: PowerShell@2
+        displayName: "Install Dependencies (CD)"
+        inputs:
+          targetType: inline
+          pwsh: true
+        script: |
+          Write-Host "=== [CD] Installing Modules ==="
+          Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
+          Install-Module Az -Scope CurrentUser -Force -AllowClobber
+          Install-Module MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
+
+          if (-not (Test-Path ".\.nuget\custom_modules")) {
+            New-Item -ItemType Directory -Path ".\.nuget\custom_modules" | Out-Null
+          }
+          $fabricModuleUrl = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1"
+          Invoke-WebRequest -Uri $fabricModuleUrl -OutFile ".\.nuget\custom_modules\FabricPS-PBIP.psm1"
+
+          Write-Host "=== [CD] Modules Installed Successfully ==="
+
+      ########################################################################
+      # Step 3: Promote to UAT with itemType, displayName
+      ########################################################################
+      - task: PowerShell@2
+        displayName: "Promote PBISM/PBIR to UAT (with itemType/displayName)"
+        env:
+          CLIENT_SECRET: "$(clientsecret)"
+          CLIENT_ID: "$(clinetid)"
+          TENANT_ID: "$(tenantid)"
+          UAT_WORKSPACE_NAME: "$(UAT_WORKSPACE_NAME)"
+          UAT_ONELAKE_ENDPOINT: "$(UAT_ONELAKE_ENDPOINT)"
+        inputs:
+          pwsh: true
+          targetType: inline
+        script: |
+          try {
+              $DebugPreference = "Continue"
+              Write-Host "=== [CD] Starting UAT Promotion ==="
+
+              # Print environment variables
+              Write-Host "CLIENT_ID: $env:CLIENT_ID"
+              Write-Host "TENANT_ID: $env:TENANT_ID"
+              Write-Host "UAT_WORKSPACE_NAME: $env:UAT_WORKSPACE_NAME"
+
+              # 1) Credentials
+              $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+              $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+              $tenantId = $env:TENANT_ID.Trim()
+
+              # Determine if service principal
+              $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+              $isServicePrincipal = $false
+              if ($credential.UserName -match $guidRegex) {
+                $isServicePrincipal = $true
+              }
+
+              # 2) Fabric Authentication
+              Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+              Write-Host "=== [CD] Authenticating to Fabric ==="
+              $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+              $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
+              if ($isServicePrincipal) {
+                Set-FabricAuthToken -ServicePrincipalId $credential.UserName -ServicePrincipalSecret $plainTextPwd -TenantId $tenantId -Reset
+              } else {
+                Set-FabricAuthToken -Credential $credential -TenantId $tenantId -Reset
+              }
+              $authToken = Get-FabricAuthToken
+              if (-not $authToken) {
+                Write-Error "Fabric authentication failed."
+                throw "Fabric authentication failed."
+              }
+
+              # 3) Azure & OneLake Auth
+              Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+              Write-Host "=== [CD] Authenticating to OneLake with AzCopy ==="
+              $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+              $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+              $oneLakeDomain = $oneLakeUri.Host
+              $loginResult = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
+              $checkResult = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+              if (!$checkResult) {
+                Write-Error "AzCopy authentication failed."
+                throw "AzCopy login failed."
+              }
+
+              # 4) Power BI Service Auth
+              Write-Host "=== [CD] Connecting to Power BI Service ==="
+              if ($isServicePrincipal) {
+                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+              } else {
+                Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+              }
+
+              # 5) List artifacts
+              $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
+              Write-Host "Artifacts root: $downloadRoot"
+              $allFiles = Get-ChildItem -Path $downloadRoot -Recurse
+              if (-not $allFiles -or $allFiles.Count -eq 0) {
+                Write-Host "No .pbism or .pbir artifacts found. Nothing to import."
+                exit 0
+              }
+
+              Write-Host "Listing all artifacts found:"
+              $allFiles | ForEach-Object { Write-Host " - $($_.FullName)" }
+
+              # 6) Get the UAT Workspace
+              Write-Host "=== [CD] Retrieving UAT Workspace ==="
+              $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
+              if (-not $workspaceObj) {
+                Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
+                throw "Workspace not found."
+              }
+              $workspaceID = $workspaceObj.Id
+              Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
+
+              # 7) Import PBISM (Semantic Models) First
+              Write-Host "=== [CD] Importing PBISM Files with itemType/displayName ==="
+              $pbismFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbism" }
+              foreach ($pbism in $pbismFiles) {
+                $modelFolder = $pbism.DirectoryName
+                $modelName   = Split-Path $modelFolder -Leaf
+                Write-Host "Importing semantic model from folder: $modelFolder"
+
+                # Provide itemType=SemanticModel, displayName=modelName
+                $itemProps = @{
+                  itemType    = "SemanticModel"
+                  displayName = $modelName
+                }
+
+                try {
+                  $resultSM = Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -itemProperties $itemProps -ErrorAction Stop
+                  Write-Host "Semantic model imported: $($resultSM.displayName) (ID: $($resultSM.id))"
+                } catch {
+                  Write-Error "Error importing semantic model from $modelFolder:"
+                  Write-Error $_.Exception.Message
+                  throw
+                }
+              }
+
+              # 8) Import PBIR (Reports) Next
+              Write-Host "=== [CD] Importing PBIR Files with itemType/displayName ==="
+              $pbirFiles = $allFiles | Where-Object { -not $_.PSIsContainer -and $_.Extension -eq ".pbir" }
+              foreach ($pbir in $pbirFiles) {
+                $reportFolder = $pbir.DirectoryName
+                $reportName   = Split-Path $reportFolder -Leaf
+                Write-Host "Importing report from folder: $reportFolder"
+
+                # Potentially parse definition.pbir for semantic model references (like in combined pipeline).
+                # For now, we replicate the manager snippet logic if needed.
+                $defFile = Get-ChildItem -Path $reportFolder -Filter "definition.pbir" -ErrorAction SilentlyContinue
+                if (-not $defFile) {
+                  Write-Warning "No definition.pbir found in $reportFolder, importing as-is."
+                } else {
+                  Write-Host "definition.pbir found: $($defFile.FullName)"
+                }
+
+                # Provide itemType=Report, displayName=reportName
+                $reportProps = @{
+                  itemType    = "Report"
+                  displayName = $reportName
+                  # If you need to re-import the semantic model to get semanticModelId, do it here
+                  # and add semanticModelId to $reportProps
+                }
+
+                try {
+                  $resultRpt = Import-FabricItem -WorkspaceId $workspaceID -Path $reportFolder -itemProperties $reportProps
+                  Write-Host "Report imported successfully: $($resultRpt.displayName)"
+                } catch {
+                  Write-Error "Error importing report from $reportFolder:"
+                  Write-Error $_.Exception.Message
+                  throw
+                }
+              }
+
+              Write-Host "=== [CD] Promotion to UAT completed successfully ==="
+              exit 0
+
+          } catch {
+              Write-Error "=== [CD] A Fatal Error Occurred ==="
+              Write-Error $_.Exception.Message
+              throw
+          }
