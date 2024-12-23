@@ -4865,41 +4865,50 @@ jobs:
             Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
 
       # Authenticate and Debug Credentials
-      - task: PowerShell@2
-        displayName: "Authenticate and Debug Credentials"
-        env:
-          CLIENT_SECRET: "$(clientsecret)"
-          CLIENT_ID: "$(clientid)"
-          TENANT_ID: "$(tenantid)"
-        inputs:
-          pwsh: true
-          targetType: inline
-          script: |
-            try {
-              Write-Host "=== Authenticating to Azure and Power BI ==="
-              
-              $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
-              $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secureSecret)
+- task: PowerShell@2
+  displayName: "Authenticate and Debug Credentials"
+  env:
+    CLIENT_SECRET: "$(clientsecret)"
+    CLIENT_ID: "$(clientid)"
+    TENANT_ID: "$(tenantid)"
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+          $DebugPreference = "Continue"
+          Write-Host "=== [Auth Debug] Starting Authentication ==="
 
-              # Azure Authentication
-              Connect-AzAccount -ServicePrincipal -Tenant $env:TENANT_ID -Credential $credential -Scope "https://management.azure.com/.default" -ErrorAction Stop
-              Write-Host "Azure Authentication Successful"
+          # Unload AzureRM to avoid conflicts
+          Write-Host "Unloading AzureRM Module (if present)"
+          Get-Module -Name AzureRM -ListAvailable | Remove-Module -Force -ErrorAction SilentlyContinue
 
-              # Power BI Authentication
-              Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID -ErrorAction Stop
-              Write-Host "Power BI Authentication Successful"
+          # Debugging environment variables
+          Write-Host "Environment Variables:"
+          Write-Host " - ClientId: $env:CLIENT_ID"
+          Write-Host " - TenantId: $env:TENANT_ID"
 
-              # Debugging Token
-              Write-Host "=== Debugging Access Token ==="
-              $context = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($env:CLIENT_ID).WithClientSecret($secureSecret).WithAuthority("https://login.microsoftonline.com/$env:TENANT_ID").Build()
-              $result = $context.AcquireTokenForClient("https://analysis.windows.net/powerbi/api/.default").ExecuteAsync().Result
-              Write-Host "Access Token Retrieved: $($result.AccessToken.Substring(0, 20))... [Truncated]"
+          # Convert CLIENT_SECRET to secure string
+          $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secureSecret)
 
-            } catch {
-              Write-Error "Authentication Failed"
-              Write-Error $_.Exception.Message
-              throw $_
-            }
+          # Authenticate to Azure
+          Write-Host "Authenticating to Azure..."
+          Connect-AzAccount -ServicePrincipal -Tenant $env:TENANT_ID -Credential $credential -Scope "https://management.azure.com/.default" -ErrorAction Stop
+          Write-Host "Azure Authentication Successful"
+
+          # Authenticate to Power BI
+          Write-Host "Authenticating to Power BI..."
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID -ErrorAction Stop
+          Write-Host "Power BI Authentication Successful"
+
+          Write-Host "=== [Auth Debug] Authentication Completed ==="
+      } catch {
+          Write-Error "Authentication Failed"
+          Write-Error $_.Exception.Message
+          throw $_
+      }
+
 
       # Promote Artifacts to UAT
       - task: PowerShell@2
