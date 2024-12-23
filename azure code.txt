@@ -4841,9 +4841,7 @@ jobs:
     steps:
       - checkout: none
 
-      ########################################################################
-      # Step 1: Download Build Artifacts
-      ########################################################################
+      # Download Artifacts
       - task: DownloadBuildArtifacts@0
         displayName: "Download Build Artifacts"
         inputs:
@@ -4854,40 +4852,56 @@ jobs:
           artifactName: 'PowerBIArtifacts'
           downloadPath: '$(System.DefaultWorkingDirectory)/PowerBIArtifacts'
 
-      ########################################################################
-      # Step 2: Install Dependencies
-      ########################################################################
+      # Install Dependencies
       - task: PowerShell@2
-        displayName: '=== Installing Dependencies ==='
+        displayName: 'Install Dependencies'
         inputs:
           pwsh: true
           targetType: inline
           script: |
-            Write-Host "Setting up PowerShell environment..."
+            Write-Host "=== Installing Required Modules ==="
             Set-PSRepository -Name PSGallery -InstallationPolicy Trusted
-
-            Write-Host "Installing required modules..."
             Install-Module -Name Az -Force -AllowClobber -Scope CurrentUser
             Install-Module -Name MicrosoftPowerBIMgmt -Force -AllowClobber -Scope CurrentUser
 
-            # Create directory for custom modules
-            if (-not (Test-Path ".\.nuget\custom_modules")) {
-              New-Item -Path ".\.nuget\custom_modules" -ItemType Directory -Force | Out-Null
+      # Authenticate and Debug Credentials
+      - task: PowerShell@2
+        displayName: "Authenticate and Debug Credentials"
+        env:
+          CLIENT_SECRET: "$(clientsecret)"
+          CLIENT_ID: "$(clientid)"
+          TENANT_ID: "$(tenantid)"
+        inputs:
+          pwsh: true
+          targetType: inline
+          script: |
+            try {
+              Write-Host "=== Authenticating to Azure and Power BI ==="
+              
+              $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
+              $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secureSecret)
+
+              # Azure Authentication
+              Connect-AzAccount -ServicePrincipal -Tenant $env:TENANT_ID -Credential $credential -Scope "https://management.azure.com/.default" -ErrorAction Stop
+              Write-Host "Azure Authentication Successful"
+
+              # Power BI Authentication
+              Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID -ErrorAction Stop
+              Write-Host "Power BI Authentication Successful"
+
+              # Debugging Token
+              Write-Host "=== Debugging Access Token ==="
+              $context = [Microsoft.Identity.Client.ConfidentialClientApplicationBuilder]::Create($env:CLIENT_ID).WithClientSecret($secureSecret).WithAuthority("https://login.microsoftonline.com/$env:TENANT_ID").Build()
+              $result = $context.AcquireTokenForClient("https://analysis.windows.net/powerbi/api/.default").ExecuteAsync().Result
+              Write-Host "Access Token Retrieved: $($result.AccessToken.Substring(0, 20))... [Truncated]"
+
+            } catch {
+              Write-Error "Authentication Failed"
+              Write-Error $_.Exception.Message
+              throw $_
             }
 
-            # Download Fabric modules
-            @(
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1",
-              "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psd1"
-            ) | ForEach-Object {
-              $fileName = Split-Path $_ -Leaf
-              $destPath = Join-Path ".\.nuget\custom_modules" $fileName
-              Invoke-WebRequest -Uri $_ -OutFile $destPath
-            }
-
-      ########################################################################
-      # Step 3: Promote to UAT
-      ########################################################################
+      # Promote Artifacts to UAT
       - task: PowerShell@2
         displayName: "Promote PBISM/PBIR to UAT"
         env:
@@ -4899,69 +4913,44 @@ jobs:
         inputs:
           pwsh: true
           targetType: inline
-        script: |
-          try {
-              $DebugPreference = "Continue"
-              Write-Host "=== [CD] Starting UAT Promotion ==="
-
-              ########################################################################
-              # A) Authenticate to Fabric and Azure
-              ########################################################################
-              $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
-              $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
-              $tenantId = $env:TENANT_ID.Trim()
-
-              Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
-              Write-Host "Authenticating to Fabric..."
-              Set-FabricAuthToken -ServicePrincipalId $credential.UserName -ServicePrincipalSecret ($secret | ConvertFrom-SecureString -AsPlainText) -TenantId $tenantId -Reset
-              Connect-AzAccount -ServicePrincipal -TenantId $tenantId -Credential $credential -ErrorAction Stop
-
-              ########################################################################
-              # B) Retrieve UAT Workspace
-              ########################################################################
-              $workspaceObj = Get-FabricWorkspace -WorkspaceName "$($env:UAT_WORKSPACE_NAME)"
-              if (-not $workspaceObj) {
-                  Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
-                  throw "Workspace not found."
-              }
-              $workspaceID = $workspaceObj.Id
-              Write-Host "Workspace found: $($workspaceObj.DisplayName) ($workspaceID)"
-
-              ########################################################################
-              # C) List and Import PBISM Files
-              ########################################################################
+          script: |
+            try {
+              Write-Host "=== Starting Promotion to UAT ==="
+              
+              # Load Artifacts
               $downloadRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-              $pbismFiles = Get-ChildItem -Path $downloadRoot -Recurse -Filter "*.pbism"
-              if (-not $pbismFiles -or $pbismFiles.Count -eq 0) {
-                  Write-Error "No .pbism files found in the artifacts."
-                  throw "Missing semantic models."
+              $allFiles = Get-ChildItem -Path $downloadRoot -Recurse
+              if (-not $allFiles -or $allFiles.Count -eq 0) {
+                Write-Host "No artifacts found. Exiting."
+                exit 0
               }
 
+              # Retrieve UAT Workspace
+              Write-Host "Retrieving UAT Workspace"
+              $workspaceObj = Get-FabricWorkspace -WorkspaceName $env:UAT_WORKSPACE_NAME
+              if (-not $workspaceObj) {
+                throw "UAT Workspace not found"
+              }
+
+              # Promote Semantic Models
+              Write-Host "Importing Semantic Models"
+              $pbismFiles = $allFiles | Where-Object { $_.Extension -eq ".pbism" }
               foreach ($pbism in $pbismFiles) {
-                  $modelFolder = $pbism.DirectoryName
-                  $modelName = Split-Path $modelFolder -Leaf
-                  Write-Host "Importing semantic model from folder: $modelFolder"
-
-                  $smProps = @{
-                      itemType    = "SemanticModel"
-                      displayName = $modelName
-                  }
-
-                  try {
-                      $resultSM = Import-FabricItem -WorkspaceId $workspaceID -Path $modelFolder -ItemProperties $smProps
-                      Write-Host "Semantic model imported: $($resultSM.displayName) (ID: $($resultSM.id))"
-                  } catch {
-                      Write-Error "Error importing semantic model from $modelFolder:"
-                      Write-Error $_.Exception.Message
-                      throw
-                  }
+                Write-Host "Importing: $($pbism.FullName)"
+                Import-FabricItem -WorkspaceId $workspaceObj.Id -Path $pbism.FullName -ItemType "SemanticModel" -DisplayName $pbism.BaseName
               }
 
-              Write-Host "=== [CD] All PBISM Files Imported Successfully ==="
+              # Promote Reports
+              Write-Host "Importing Reports"
+              $pbirFiles = $allFiles | Where-Object { $_.Extension -eq ".pbir" }
+              foreach ($pbir in $pbirFiles) {
+                Write-Host "Importing: $($pbir.FullName)"
+                Import-FabricItem -WorkspaceId $workspaceObj.Id -Path $pbir.FullName -ItemType "Report" -DisplayName $pbir.BaseName
+              }
 
-          } catch {
-              Write-Error "=== [CD] A Fatal Error Occurred ==="
+              Write-Host "=== Promotion to UAT Completed Successfully ==="
+            } catch {
+              Write-Error "Promotion Failed"
               Write-Error $_.Exception.Message
-              throw
-          }
-
+              throw $_
+            }
