@@ -4963,3 +4963,103 @@ jobs:
               Write-Error $_.Exception.Message
               throw $_
             }
+
+
+______________________________________________________
+
+
+parameters:
+  - name: UAT_WORKSPACE_NAME
+    displayName: "UAT Workspace Name"
+    type: string
+    default: 'YourUATWorkspaceName'
+
+  - name: UAT_ONELAKE_ENDPOINT
+    displayName: "UAT OneLake Endpoint"
+    type: string
+    default: 'https://uat-onelakeendpoint.fabric.microsoft.com'
+
+trigger: none
+
+pool:
+  vmImage: 'windows-latest'
+
+variables:
+  - group: powerbi
+  - name: UAT_WORKSPACE_NAME
+    value: '${{ parameters.UAT_WORKSPACE_NAME }}'
+  - name: UAT_ONELAKE_ENDPOINT
+    value: '${{ parameters.UAT_ONELAKE_ENDPOINT }}'
+
+jobs:
+  - job: Authenticate
+    displayName: "Authenticate to Azure, Fabric, and Power BI"
+    steps:
+      - checkout: none
+
+      - task: PowerShell@2
+        displayName: "Authenticate and Debug Credentials"
+        inputs:
+          pwsh: true
+          targetType: inline
+        script: |
+          try {
+              $DebugPreference = "Continue"
+              Write-Host "=== Starting Authentication Debug ==="
+
+              # Remove conflicting modules if present
+              Write-Host "Unloading conflicting AzureRM modules..."
+              Get-Module -Name AzureRM* -ListAvailable | Remove-Module -Force -ErrorAction SilentlyContinue
+
+              # Import required modules
+              Import-Module MicrosoftPowerBIMgmt -Force
+              Import-Module Az.Accounts -Force
+              Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+
+              # Debugging environment variables
+              Write-Host "ClientId: $env:CLIENT_ID"
+              Write-Host "TenantId: $env:TENANT_ID"
+
+              # Convert CLIENT_SECRET to secure string
+              $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
+              $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secureSecret)
+              $tenantId = $env:TENANT_ID.Trim()
+
+              # Authenticate to Azure
+              Write-Host "Authenticating to Azure..."
+              Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential -ErrorAction Stop
+              Write-Host "Azure Authentication Successful."
+
+              # Authenticate to OneLake using AzCopy
+              Write-Host "Authenticating to OneLake with AzCopy..."
+              $env:AZCOPY_SPA_CLIENT_SECRET = $secureSecret
+              $oneLakeUri = New-Object System.Uri("$($env:UAT_ONELAKE_ENDPOINT)".Trim())
+              $oneLakeDomain = $oneLakeUri.Host
+              $azCopyResult = azcopy login --service-principal `
+                  --application-id $env:CLIENT_ID `
+                  --tenant-id $tenantId `
+                  --trusted-microsoft-suffixes="$oneLakeDomain" `
+                  --output-type json | ConvertFrom-Json
+              if (-not $azCopyResult) {
+                  Write-Error "AzCopy authentication failed."
+                  throw "AzCopy authentication failed."
+              }
+              Write-Host "AzCopy Authentication Successful."
+
+              # Authenticate to Power BI Service
+              Write-Host "Authenticating to Power BI Service..."
+              Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+              Write-Host "Power BI Authentication Successful."
+
+              Write-Host "=== Authentication Debug Completed Successfully ==="
+          } catch {
+              Write-Error "Authentication Failed."
+              Write-Error $_.Exception.Message
+              throw $_
+          }
+        env:
+          CLIENT_SECRET: $(Clientsecret)
+          CLIENT_ID: $(clinetid)
+          TENANT_ID: $(tenantid)
+          UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
