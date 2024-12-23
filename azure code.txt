@@ -4487,103 +4487,104 @@ ___________________________________________________________________________
 CI
 ___________________________________________________
 trigger:
-- main
+  - main
 
 pool:
   vmImage: 'windows-latest'
 
 jobs:
-- job: BuildAndArchive
-  displayName: "CI - Build and Publish PBISM/PBIR Artifacts"
+  - job: BuildAndArchive
+    displayName: "CI - Build and Publish PBISM/PBIR Artifacts"
 
-  steps:
-    ########################################################################
-    # Step 1: Check out source code
-    ########################################################################
-    - checkout: self
-      persistCredentials: true
+    steps:
+      ########################################################################
+      # Step 1: Check out source code
+      ########################################################################
+      - checkout: self
+        persistCredentials: true
 
-    ########################################################################
-    # Step 2: Install Dependencies
-    ########################################################################
-    - task: PowerShell@2
-      displayName: "Install Dependencies (CI)"
-      inputs:
-        pwsh: true
-        targetType: inline
-      script: |
-        Write-Host "=== [CI] Setting up PowerShell environment ==="
-        Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
+      ########################################################################
+      # Step 2: Install Dependencies
+      ########################################################################
+      - task: PowerShell@2
+        displayName: "Install Dependencies (CI)"
+        inputs:
+          pwsh: true
+          targetType: inline
+        script: |
+          Write-Host "=== [CI] Setting up PowerShell environment ==="
+          Set-PSRepository -Name 'PSGallery' -InstallationPolicy Trusted
 
-        Write-Host "=== [CI] Installing Required Modules ==="
-        Install-Module Az -Scope CurrentUser -Force -AllowClobber
-        Install-Module MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
+          Write-Host "=== [CI] Installing Required Modules ==="
+          Install-Module Az -Scope CurrentUser -Force -AllowClobber
+          Install-Module MicrosoftPowerBIMgmt -Scope CurrentUser -Force -AllowClobber
 
-        # Optional: Download FabricPS-PBIP
-        if (-not (Test-Path ".\.nuget\custom_modules")) {
-          New-Item -ItemType Directory -Path ".\.nuget\custom_modules" | Out-Null
-        }
-        $fabricModuleUrl = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1"
-        Invoke-WebRequest -Uri $fabricModuleUrl -OutFile ".\.nuget\custom_modules\FabricPS-PBIP.psm1"
-
-        Write-Host "=== [CI] Modules Installed ==="
-
-    ########################################################################
-    # Step 3: Detect & Copy Changed PBISM/PBIR Files
-    ########################################################################
-    - task: PowerShell@2
-      displayName: "Detect and Archive PBISM/PBIR Changes"
-      inputs:
-        pwsh: true
-        targetType: inline
-      script: |
-        Write-Host "=== [CI] Detecting PBISM and PBIR files via git diff ==="
-
-        $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
-        $pbirChanges  = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
-
-        $pbismList = $pbismChanges | Sort-Object -Unique
-        $pbirList  = $pbirChanges  | Sort-Object -Unique
-
-        Write-Host "PBISM changed files:"
-        $pbismList | ForEach-Object { Write-Host "- $_" }
-        Write-Host "PBIR changed files:"
-        $pbirList  | ForEach-Object { Write-Host "- $_" }
-
-        if (($pbismList.Count -eq 0) -and ($pbirList.Count -eq 0)) {
-          Write-Host "No PBISM/PBIR changes detected."
-        }
-
-        $artifactFolder = "$(Build.SourcesDirectory)\ChangedArtifacts"
-        if (-not (Test-Path $artifactFolder)) {
-          New-Item -ItemType Directory -Path $artifactFolder | Out-Null
-        }
-
-        foreach ($file in $pbismList + $pbirList) {
-          $src = Join-Path "$(Build.SourcesDirectory)" $file
-          if (Test-Path $src) {
-            Write-Host "Copying file: $src"
-            $dest = Join-Path $artifactFolder $file
-            $destDir = Split-Path $dest -Parent
-            if (-not (Test-Path $destDir)) {
-              New-Item -ItemType Directory -Path $destDir | Out-Null
-            }
-            Copy-Item $src -Destination $dest
+          # Optional: Download FabricPS-PBIP
+          if (-not (Test-Path ".\.nuget\custom_modules")) {
+            New-Item -ItemType Directory -Path ".\.nuget\custom_modules" | Out-Null
           }
-        }
+          $fabricModuleUrl = "https://raw.githubusercontent.com/microsoft/Analysis-Services/master/pbidevmode/fabricps-pbip/FabricPS-PBIP.psm1"
+          Invoke-WebRequest `
+            -Uri $fabricModuleUrl `
+            -OutFile ".\.nuget\custom_modules\FabricPS-PBIP.psm1"
 
-        Write-Host "=== [CI] Files copied to artifact folder: $artifactFolder ==="
+          Write-Host "=== [CI] Modules Installed ==="
 
-    ########################################################################
-    # Step 4: Publish the Artifact
-    ########################################################################
-    - task: PublishBuildArtifacts@1
-      displayName: "Publish PBISM/PBIR Artifacts"
-      inputs:
-        PathtoPublish: "$(Build.SourcesDirectory)\ChangedArtifacts"
-        ArtifactName: "PowerBIArtifacts"
-        publishLocation: "Container"
+      ########################################################################
+      # Step 3: Detect & Copy Changed PBISM/PBIR Files
+      ########################################################################
+      - task: PowerShell@2
+        displayName: "Detect and Archive PBISM/PBIR Changes"
+        inputs:
+          pwsh: true
+          targetType: inline
+        script: |
+          Write-Host "=== [CI] Detecting PBISM and PBIR files via git diff ==="
 
+          $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
+          $pbirChanges  = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
+
+          $pbismList = $pbismChanges | Sort-Object -Unique
+          $pbirList  = $pbirChanges  | Sort-Object -Unique
+
+          Write-Host "PBISM changed files:"
+          $pbismList | ForEach-Object { Write-Host "- $_" }
+          Write-Host "PBIR changed files:"
+          $pbirList  | ForEach-Object { Write-Host "- $_" }
+
+          if (($pbismList.Count -eq 0) -and ($pbirList.Count -eq 0)) {
+            Write-Host "No PBISM/PBIR changes detected."
+          }
+
+          $artifactFolder = "$(Build.SourcesDirectory)\ChangedArtifacts"
+          if (-not (Test-Path $artifactFolder)) {
+            New-Item -ItemType Directory -Path $artifactFolder | Out-Null
+          }
+
+          foreach ($file in $pbismList + $pbirList) {
+            $src = Join-Path "$(Build.SourcesDirectory)" $file
+            if (Test-Path $src) {
+              Write-Host "Copying file: $src"
+              $dest = Join-Path $artifactFolder $file
+              $destDir = Split-Path $dest -Parent
+              if (-not (Test-Path $destDir)) {
+                New-Item -ItemType Directory -Path $destDir | Out-Null
+              }
+              Copy-Item $src -Destination $dest
+            }
+          }
+
+          Write-Host "=== [CI] Files copied to artifact folder: $artifactFolder ==="
+
+      ########################################################################
+      # Step 4: Publish the Artifact
+      ########################################################################
+      - task: PublishBuildArtifacts@1
+        displayName: "Publish PBISM/PBIR Artifacts"
+        inputs:
+          PathtoPublish: "$(Build.SourcesDirectory)\ChangedArtifacts"
+          ArtifactName: "PowerBIArtifacts"
+          publishLocation: "Container"
 
 ----------------------------------------------------------------
 CD
