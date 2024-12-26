@@ -5155,3 +5155,134 @@ jobs:
       PathtoPublish: '$(Build.ArtifactStagingDirectory)/PowerBIArtifacts'
       ArtifactName: 'PowerBIArtifacts'
       publishLocation: 'Container'
+------------------------------------------------------------
+
+- task: PowerShell@2
+  displayName: '=== Promoting Items to UAT ==='
+  env:
+    CLIENT_SECRET: $(clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
+
+          $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+          $tenantId = $env:TENANT_ID.Trim()
+
+          Write-Host "=== Authenticating ==="
+          $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
+          
+          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
+          Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
+
+          # Define paths
+          $artifactRoot = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts"
+          Write-Host "Artifact root path: $artifactRoot"
+          
+          Write-Host "`nListing artifact contents:"
+          Get-ChildItem -Path $artifactRoot -Recurse | ForEach-Object {
+              Write-Host $_.FullName
+          }
+
+          Write-Host "`n=== Getting UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
+          if (-not $workspaceObj) {
+              throw "UAT workspace not found: $($env:UAT_WORKSPACE_NAME)"
+          }
+          $workspaceId = $workspaceObj.Id
+          Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
+
+          # Dictionary to track imported models
+          $importedModels = @{}
+
+          # Import semantic models first
+          Write-Host "`n=== Processing Semantic Models ==="
+          $smPath = Join-Path $artifactRoot "SemanticModels"
+          if (Test-Path $smPath) {
+              $modelFolders = Get-ChildItem -Path $smPath -Directory
+              foreach ($modelFolder in $modelFolders) {
+                  Write-Host "Processing model: $($modelFolder.Name)"
+                  
+                  $pbismFile = Get-ChildItem -Path $modelFolder.FullName -Filter "definition.pbism" -File
+                  if ($pbismFile) {
+                      try {
+                          $modelResult = Import-FabricItem `
+                              -workspaceId $workspaceId `
+                              -path $modelFolder.FullName `
+                              -itemProperties @{
+                                  displayName = $modelFolder.Name
+                                  itemType = "semanticModel"
+                              } `
+                              -Verbose
+                          
+                          if ($modelResult) {
+                              $importedModels[$modelFolder.Name] = $modelResult.id
+                              Write-Host "Successfully imported model: $($modelFolder.Name) with ID: $($modelResult.id)"
+                          }
+                      }
+                      catch {
+                          Write-Error "Failed to import model $($modelFolder.Name): $_"
+                          continue
+                      }
+                  }
+              }
+          }
+
+          # Import reports
+          Write-Host "`n=== Processing Reports ==="
+          $reportsPath = Join-Path $artifactRoot "Reports"
+          if (Test-Path $reportsPath) {
+              $reportFolders = Get-ChildItem -Path $reportsPath -Directory
+              foreach ($reportFolder in $reportFolders) {
+                  Write-Host "Processing report: $($reportFolder.Name)"
+                  
+                  $pbirFile = Get-ChildItem -Path $reportFolder.FullName -Filter "definition.pbir" -File
+                  if ($pbirFile) {
+                      # Look for matching model ID
+                      $modelId = $importedModels[$reportFolder.Name]
+                      if ($modelId) {
+                          try {
+                              $reportResult = Import-FabricItem `
+                                  -workspaceId $workspaceId `
+                                  -path $reportFolder.FullName `
+                                  -itemProperties @{
+                                      displayName = $reportFolder.Name
+                                      itemType = "report"
+                                      semanticModelId = $modelId
+                                  } `
+                                  -Verbose
+                              
+                              Write-Host "Successfully imported report: $($reportFolder.Name)"
+                          }
+                          catch {
+                              Write-Error "Failed to import report $($reportFolder.Name): $_"
+                              continue
+                          }
+                      }
+                      else {
+                          Write-Warning "No matching semantic model found for report: $($reportFolder.Name)"
+                      }
+                  }
+              }
+          }
+
+          Write-Host "`n=== Deployment Summary ==="
+          Write-Host "Successfully processed:"
+          Write-Host "- $($importedModels.Count) semantic models"
+          Write-Host "- $($reportFolders.Count) reports"
+
+      }
+      catch {
+          Write-Error "Deployment failed: $_"
+          Write-Error $_.ScriptStackTrace
+          throw
+      }
