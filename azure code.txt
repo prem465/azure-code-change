@@ -5069,60 +5069,85 @@ jobs:
 
 
 - task: PowerShell@2
-    displayName: 'Detect and Archive PBISM/PBIR Changes'
-    inputs:
-      pwsh: true
-      targetType: inline
-      script: |
-        # Get changed files
-        $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
-        $pbirChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
-        
-        $pbismList = $pbismChanges | Sort-Object -Unique
-        $pbirList = $pbirChanges | Sort-Object -Unique
-        
-        Write-Host "PBISM changed files:"
-        $pbismList | ForEach-Object { Write-Host "- $_" }
-        Write-Host "PBIR changed files:"
-        $pbirList | ForEach-Object { Write-Host "- $_" }
-
-        # Create artifact structure
-        $artifactFolder = "$(Build.ArtifactStagingDirectory)/PowerBIArtifacts"
-        if (-not (Test-Path $artifactFolder)) {
-            New-Item -ItemType Directory -Path $artifactFolder -Force | Out-Null
-        }
-
-        # Copy semantic models
-        if ($pbismList) {
-            $smFolder = Join-Path $artifactFolder "SemanticModels"
-            New-Item -ItemType Directory -Path $smFolder -Force | Out-Null
-            
-            foreach ($file in $pbismList) {
-                $src = Join-Path "$(Build.SourcesDirectory)" $file
-                $destFolder = Join-Path $smFolder (Split-Path (Split-Path $file -Parent) -Leaf)
-                if (-not (Test-Path $destFolder)) {
-                    New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
-                }
-                Copy-Item $src -Destination (Join-Path $destFolder "definition.pbism") -Force
-                Write-Host "Copied: $file"
-            }
-        }
-
-        # Copy reports
-        if ($pbirList) {
-            $rptFolder = Join-Path $artifactFolder "Reports"
-            New-Item -ItemType Directory -Path $rptFolder -Force | Out-Null
-            
-            foreach ($file in $pbirList) {
-                $src = Join-Path "$(Build.SourcesDirectory)" $file
-                $destFolder = Join-Path $rptFolder (Split-Path (Split-Path $file -Parent) -Leaf)
-                if (-not (Test-Path $destFolder)) {
-                    New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
-                }
-                Copy-Item $src -Destination (Join-Path $destFolder "definition.pbir") -Force
-                Write-Host "Copied: $file"
-            }
-        }
+  displayName: 'Detect and Archive PBISM/PBIR Changes'
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      # Get changed files with folder deduplication
+      $pbismChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism'
+      $pbirChanges = git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir'
+      
+      # Use hashtables to track unique folders
+      $uniqueModelFolders = @{}
+      $uniqueReportFolders = @{}
+      
+      # Process semantic models
+      foreach ($change in $pbismChanges) {
+          $folder = Split-Path (Split-Path $change -Parent) -Leaf
+          $baseFolder = $folder -replace '\.report$|\.semantic$|\.SemanticModel$', ''
+          if (-not $uniqueModelFolders.ContainsKey($baseFolder)) {
+              $uniqueModelFolders[$baseFolder] = $change
+          }
+      }
+      
+      # Process reports
+      foreach ($change in $pbirChanges) {
+          $folder = Split-Path (Split-Path $change -Parent) -Leaf
+          $baseFolder = $folder -replace '\.report$|\.Report$', ''
+          if (-not $uniqueReportFolders.ContainsKey($baseFolder)) {
+              $uniqueReportFolders[$baseFolder] = $change
+          }
+      }
+      
+      Write-Host "Unique PBISM files to process:"
+      $uniqueModelFolders.Values | ForEach-Object { Write-Host "- $_" }
+      Write-Host "Unique PBIR files to process:"
+      $uniqueReportFolders.Values | ForEach-Object { Write-Host "- $_" }
+      
+      # Create artifact structure
+      $artifactFolder = "$(Build.ArtifactStagingDirectory)/PowerBIArtifacts"
+      if (-not (Test-Path $artifactFolder)) {
+          New-Item -ItemType Directory -Path $artifactFolder -Force | Out-Null
+      }
+      
+      # Copy unique semantic models
+      if ($uniqueModelFolders.Count -gt 0) {
+          $smFolder = Join-Path $artifactFolder "SemanticModels"
+          New-Item -ItemType Directory -Path $smFolder -Force | Out-Null
+          
+          foreach ($modelFile in $uniqueModelFolders.Values) {
+              $src = Join-Path "$(Build.SourcesDirectory)" $modelFile
+              $modelName = Split-Path (Split-Path $modelFile -Parent) -Leaf
+              $baseModelName = $modelName -replace '\.report$|\.semantic$|\.SemanticModel$', ''
+              $destFolder = Join-Path $smFolder $baseModelName
+              
+              if (-not (Test-Path $destFolder)) {
+                  New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
+              }
+              Copy-Item $src -Destination (Join-Path $destFolder "definition.pbism") -Force
+              Write-Host "Copied model: $baseModelName"
+          }
+      }
+      
+      # Copy unique reports
+      if ($uniqueReportFolders.Count -gt 0) {
+          $rptFolder = Join-Path $artifactFolder "Reports"
+          New-Item -ItemType Directory -Path $rptFolder -Force | Out-Null
+          
+          foreach ($reportFile in $uniqueReportFolders.Values) {
+              $src = Join-Path "$(Build.SourcesDirectory)" $reportFile
+              $reportName = Split-Path (Split-Path $reportFile -Parent) -Leaf
+              $baseReportName = $reportName -replace '\.report$|\.Report$', ''
+              $destFolder = Join-Path $rptFolder $baseReportName
+              
+              if (-not (Test-Path $destFolder)) {
+                  New-Item -ItemType Directory -Path $destFolder -Force | Out-Null
+              }
+              Copy-Item $src -Destination (Join-Path $destFolder "definition.pbir") -Force
+              Write-Host "Copied report: $baseReportName"
+          }
+      }
 
   - task: PublishBuildArtifacts@1
     displayName: 'Publish Artifacts'
@@ -5130,4 +5155,3 @@ jobs:
       PathtoPublish: '$(Build.ArtifactStagingDirectory)/PowerBIArtifacts'
       ArtifactName: 'PowerBIArtifacts'
       publishLocation: 'Container'
-
