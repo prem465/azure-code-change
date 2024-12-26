@@ -5173,7 +5173,7 @@ jobs:
           Import-Module Az.Accounts -Force
           Import-Module MicrosoftPowerBIMgmt -Force
 
-          # Authentication
+          # Authentication setup
           $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
           $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
           $tenantId = $env:TENANT_ID.Trim()
@@ -5185,41 +5185,32 @@ jobs:
           $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
           Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
 
-          # Define paths and verify
-          $downloadPath = "$(System.DefaultWorkingDirectory)/PowerBIArtifacts"
-          Write-Host "Download path: $downloadPath"
-          
-          # List all possible paths
-          Write-Host "`nChecking possible artifact locations:"
-          $possiblePaths = @(
-              "$(System.DefaultWorkingDirectory)/PowerBIArtifacts",
-              "$(System.DefaultWorkingDirectory)/PowerBIArtifacts/PowerBIArtifacts",
-              "$downloadPath",
-              "$downloadPath/PowerBIArtifacts"
-          )
+          # Define artifact paths using pipeline variables
+          Write-Host "`n=== Locating Artifacts ==="
+          $buildArtifactsPath = Join-Path -Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY -ChildPath "PowerBIArtifacts"
+          Write-Host "Build artifacts path: $buildArtifactsPath"
 
-          $artifactRoot = $null
-          foreach ($path in $possiblePaths) {
-              Write-Host "Checking path: $path"
-              if (Test-Path $path) {
-                  Write-Host "Path exists: $path"
-                  $files = Get-ChildItem -Path $path -Recurse
-                  Write-Host "Files found: $($files.Count)"
-                  if ($files.Count -gt 0) {
-                      $artifactRoot = $path
-                      Write-Host "Using path: $artifactRoot"
-                      break
+          # Verify artifact path exists
+          if (!(Test-Path $buildArtifactsPath)) {
+              Write-Host "Primary path not found, checking alternative paths..."
+              $altPath = Join-Path -Path $env:SYSTEM_ARTIFACTSDIRECTORY -ChildPath "PowerBIArtifacts"
+              if (Test-Path $altPath) {
+                  $buildArtifactsPath = $altPath
+                  Write-Host "Using alternative path: $buildArtifactsPath"
+              } else {
+                  # List all available directories for debugging
+                  Write-Host "`nAvailable directories:"
+                  Get-ChildItem -Path $env:SYSTEM_DEFAULTWORKINGDIRECTORY -Recurse -Directory | ForEach-Object {
+                      Write-Host $_.FullName
                   }
+                  throw "Could not locate artifacts directory"
               }
           }
 
-          if (-not $artifactRoot) {
-              throw "Could not find valid artifact path with files"
-          }
-
-          Write-Host "`nListing contents of artifact root:"
-          Get-ChildItem -Path $artifactRoot -Recurse | ForEach-Object {
-              Write-Host $_.FullName
+          # List files in artifact directory
+          Write-Host "`nFiles in artifact directory:"
+          Get-ChildItem -Path $buildArtifactsPath -Recurse | ForEach-Object {
+              Write-Host " - $($_.FullName)"
           }
 
           # Get workspace
@@ -5231,17 +5222,25 @@ jobs:
           $workspaceId = $workspaceObj.Id
           Write-Host "Found workspace: $($workspaceObj.Name) ($workspaceId)"
 
-          # Track imported models
-          $importedModels = @{}
+          # Find all Power BI files
+          $pbismFiles = Get-ChildItem -Path $buildArtifactsPath -Recurse -Include "*.pbism" -File -ErrorAction SilentlyContinue
+          $pbirFiles = Get-ChildItem -Path $buildArtifactsPath -Recurse -Include "*.pbir" -File -ErrorAction SilentlyContinue
 
-          # Process semantic models
-          Write-Host "`n=== Processing Semantic Models ==="
-          $semanticModels = Get-ChildItem -Path $artifactRoot -Recurse -Include "*.pbism" -File
-          foreach ($model in $semanticModels) {
+          Write-Host "`nFound files:"
+          Write-Host "- $($pbismFiles.Count) semantic model(s)"
+          Write-Host "- $($pbirFiles.Count) report(s)"
+
+          if ($pbismFiles.Count -eq 0 -and $pbirFiles.Count -eq 0) {
+              throw "No Power BI files found in artifacts"
+          }
+
+          # Import semantic models
+          $importedModels = @{}
+          foreach ($model in $pbismFiles) {
               $modelFolder = $model.Directory
               $modelName = $modelFolder.Name
-              Write-Host "Processing model: $modelName from $($model.FullName)"
-
+              Write-Host "`nProcessing semantic model: $modelName"
+              
               try {
                   $modelResult = Import-FabricItem `
                       -workspaceId $workspaceId `
@@ -5249,46 +5248,40 @@ jobs:
                       -itemProperties @{
                           displayName = $modelName
                           itemType = "semanticModel"
-                      } `
-                      -Verbose
-
+                      }
+                  
                   if ($modelResult) {
                       $importedModels[$modelFolder.FullName] = $modelResult.id
-                      Write-Host "Successfully imported model with ID: $($modelResult.id)"
+                      Write-Host "Successfully imported model: $modelName"
                   }
               }
               catch {
-                  Write-Error "Failed to import model: $_"
+                  Write-Error "Failed to import model $modelName`: $_"
                   throw
               }
           }
 
-          # Process reports
-          Write-Host "`n=== Processing Reports ==="
-          $reports = Get-ChildItem -Path $artifactRoot -Recurse -Include "*.pbir" -File
-          foreach ($report in $reports) {
+          # Import reports
+          foreach ($report in $pbirFiles) {
               $reportFolder = $report.Directory
               $reportName = $reportFolder.Name
-              Write-Host "Processing report: $reportName from $($report.FullName)"
+              Write-Host "`nProcessing report: $reportName"
 
-              # Look for associated model
               $modelId = $importedModels[$reportFolder.FullName]
               if ($modelId) {
                   try {
-                      $reportResult = Import-FabricItem `
+                      Import-FabricItem `
                           -workspaceId $workspaceId `
                           -path $reportFolder.FullName `
                           -itemProperties @{
                               displayName = $reportName
                               itemType = "report"
                               semanticModelId = $modelId
-                          } `
-                          -Verbose
-                      
+                          }
                       Write-Host "Successfully imported report: $reportName"
                   }
                   catch {
-                      Write-Error "Failed to import report: $_"
+                      Write-Error "Failed to import report $reportName`: $_"
                       throw
                   }
               }
@@ -5298,9 +5291,6 @@ jobs:
           }
 
           Write-Host "`n=== Deployment Complete ==="
-          Write-Host "Successfully processed:"
-          Write-Host "- $($semanticModels.Count) semantic models"
-          Write-Host "- $($reports.Count) reports"
 
       }
       catch {
