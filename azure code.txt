@@ -5298,3 +5298,147 @@ jobs:
           Write-Error $_.ScriptStackTrace
           throw
       }
+--------------------------------------------------------------
+
+- task: PowerShell@2
+  displayName: "=== Promoting Changes to UAT ==="
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+          # Set Debug Level
+          $DebugPreference = "Continue"
+
+          Write-Host "=== Starting Promotion Process ==="
+
+          # Import Required Modules
+          Write-Host "=== Importing Required Modules ==="
+          Import-Module ".\.nuget\custom_modules\FabricPS-PBIP" -Force
+          Import-Module Az.Accounts -Force
+          Import-Module MicrosoftPowerBIMgmt -Force
+
+          # Set Credentials
+          Write-Host "=== Setting Up Credentials ==="
+          $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+          $tenantId = $env:TENANT_ID.Trim()
+
+          # Authenticate to Fabric
+          Write-Host "=== Authenticating to Fabric ==="
+          $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          $plainTextPwd = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
+          $isServicePrincipal = $false
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          if ($credential.UserName -match $guidRegex) {
+              $isServicePrincipal = $true
+          }
+
+          if ($isServicePrincipal) {
+              Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                  -servicePrincipalSecret $plainTextPwd `
+                  -tenantId $tenantId -reset
+          } else {
+              Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+          }
+
+          # Validate Authentication
+          $authToken = Get-FabricAuthToken
+          if (-not $authToken) {
+              Write-Error "Authentication to Fabric failed."
+              throw "Fabric authentication failed."
+          }
+
+          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+          Write-Host "Authentication Successful."
+
+          # Detect File Changes and Deletions
+          Write-Host "=== Detecting Changes and Deletions ==="
+          $pbipSMChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbism')
+          $pbipRptChanges = @(git diff --name-only --relative --diff-filter=d HEAD~1..HEAD '**/*.pbir')
+          $pbipSMDeletions = @(git diff --name-only --relative --diff-filter=D HEAD~1..HEAD '**/*.pbism')
+          $pbipRptDeletions = @(git diff --name-only --relative --diff-filter=D HEAD~1..HEAD '**/*.pbir')
+
+          Write-Host "Semantic Model Changes: $($pbipSMChanges.Count)"
+          Write-Host "Report Changes: $($pbipRptChanges.Count)"
+          Write-Host "Semantic Model Deletions: $($pbipSMDeletions.Count)"
+          Write-Host "Report Deletions: $($pbipRptDeletions.Count)"
+
+          # Connect to UAT Workspace
+          Write-Host "=== Connecting to UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+          if (-not $workspaceObj) {
+              Write-Error ("UAT workspace '{0}' not found." -f $env:UAT_WORKSPACE_NAME)
+              throw "Workspace not found."
+          }
+          $workspaceID = $workspaceObj.Id
+
+          # Handle Semantic Model Deletions
+          if ($pbipSMDeletions.Count -gt 0) {
+              Write-Host "=== Removing Deleted Semantic Models from UAT ==="
+              foreach ($deletion in $pbipSMDeletions) {
+                  try {
+                      Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items/$deletion" -Method DELETE
+                      Write-Host "Deleted Semantic Model: $deletion"
+                  } catch {
+                      Write-Error "Failed to delete Semantic Model: $deletion. Error: $_"
+                      throw
+                  }
+              }
+          }
+
+          # Handle Report Deletions
+          if ($pbipRptDeletions.Count -gt 0) {
+              Write-Host "=== Removing Deleted Reports from UAT ==="
+              foreach ($deletion in $pbipRptDeletions) {
+                  try {
+                      Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items/$deletion" -Method DELETE
+                      Write-Host "Deleted Report: $deletion"
+                  } catch {
+                      Write-Error "Failed to delete Report: $deletion. Error: $_"
+                      throw
+                  }
+              }
+          }
+
+          # Import Semantic Models if Changed
+          if ($pbipSMChanges.Count -gt 0) {
+              Write-Host "=== Importing Changed Semantic Models ==="
+              $smPathsToPromote = $pbipSMChanges | ForEach-Object { Split-Path $_ -Parent } | Select-Object -Unique
+              foreach ($promotePath in $smPathsToPromote) {
+                  try {
+                      Import-FabricItem -workspaceId $workspaceID -path $promotePath
+                      Write-Host "Imported Semantic Model: $promotePath"
+                  } catch {
+                      Write-Error "Failed to import Semantic Model: $promotePath. Error: $_"
+                      throw
+                  }
+              }
+          }
+
+          # Import Reports if Changed
+          if ($pbipRptChanges.Count -gt 0) {
+              Write-Host "=== Importing Changed Reports ==="
+              foreach ($change in $pbipRptChanges) {
+                  try {
+                      $parentFolder = Split-Path $change -Parent
+                      Import-FabricItem -workspaceId $workspaceID -path $parentFolder
+                      Write-Host "Imported Report: $parentFolder"
+                  } catch {
+                      Write-Error "Failed to import Report: $change. Error: $_"
+                      throw
+                  }
+              }
+          }
+
+          Write-Host "=== Promotion to UAT Completed Successfully ==="
+      } catch {
+          Write-Error "An error occurred during the promotion process. Details: $_"
+          throw
+      }
+    env:
+      CLIENT_SECRET: $(Clientsecret)
+      CLIENT_ID: $(clinetid)
+      TENANT_ID: $(tenantid)
+      UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
