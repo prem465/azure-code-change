@@ -5442,3 +5442,265 @@ jobs:
       CLIENT_ID: $(clinetid)
       TENANT_ID: $(tenantid)
       UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+
+
+
+------------------------------------------------------
+
+
+- task: PowerShell@2
+  displayName: '=== Promote to UAT ==='
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+          ##############################################################################
+          # 1) Import Required Modules & Prepare Credentials
+          ##############################################################################
+          Import-Module Az.Accounts -ErrorAction Stop
+          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
+          Import-Module FabricPS-PBIP -ErrorAction Stop
+
+          $secret     = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+          $tenantId   = $env:TENANT_ID.Trim()
+
+          Write-Host "=== Authenticating to Fabric ==="
+          $secureStringPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+          $plainTextPwd    = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($secureStringPtr)
+
+          # Check if service principal (SPN)
+          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+          $isServicePrincipal = $false
+          if ($credential.UserName -match $guidRegex) {
+            $isServicePrincipal = $true
+          }
+
+          # Get Fabric Token
+          if ($isServicePrincipal) {
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+              -servicePrincipalSecret $plainTextPwd `
+              -tenantId $tenantId -reset
+          } else {
+            Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+          }
+          $authToken = Get-FabricAuthToken
+          if (-not $authToken) {
+            Write-Error "Authentication to Fabric failed."
+            throw "Fabric authentication failed."
+          }
+
+          # Azure Auth
+          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+
+          # AzCopy Auth
+          Write-Host "=== Authenticating to OneLake with AzCopy ==="
+          $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+          $oneLakeUri    = [System.Uri] "$($env:UAT_ONELAKE_ENDPOINT)".Trim()
+          $oneLakeDomain = $oneLakeUri.Host
+          $loginResult   = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$oneLakeDomain" --output-type json | ConvertFrom-Json
+          $checkResult   = $loginResult | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." }
+          if (-not $checkResult) {
+            Write-Error "AzCopy authentication failed."
+            throw "AzCopy login failed."
+          }
+
+          # Power BI Service Account
+          Write-Host "=== Connecting to Power BI Service ==="
+          if ($isServicePrincipal) {
+            Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          } else {
+            Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+          }
+
+          ##############################################################################
+          # 2) Detect Changes (Added/Modified + Deletions)
+          ##############################################################################
+          Write-Host "=== Detecting PBISM & PBIR Changes ==="
+          # If you want HEAD~1..HEAD or some other commit range, adjust here
+          $pbipSMChanges   = @(git diff --name-only --relative --diff-filter=AM HEAD~1..HEAD '**/*.pbism')
+          $pbipRptChanges  = @(git diff --name-only --relative --diff-filter=AM HEAD~1..HEAD '**/*.pbir')
+
+          $pbipSMDeletions = @(git diff --name-only --relative --diff-filter=D  HEAD~1..HEAD '**/*.pbism')
+          $pbipRptDeletions= @(git diff --name-only --relative --diff-filter=D  HEAD~1..HEAD '**/*.pbir')
+
+          $pbipSMChanges   = $pbipSMChanges | Sort-Object -Unique
+          $pbipRptChanges  = $pbipRptChanges | Sort-Object -Unique
+          $pbipSMDeletions = $pbipSMDeletions | Sort-Object -Unique
+          $pbipRptDeletions= $pbipRptDeletions | Sort-Object -Unique
+
+          Write-Host "PBISM Added/Modified Count:  $($pbipSMChanges.Count)"
+          Write-Host "PBIR Added/Modified Count:   $($pbipRptChanges.Count)"
+          Write-Host "PBISM Deletions Count:       $($pbipSMDeletions.Count)"
+          Write-Host "PBIR Deletions Count:        $($pbipRptDeletions.Count)"
+
+          # If no changes or deletions, exit
+          if (
+            $pbipSMChanges.Count   -eq 0 -and
+            $pbipRptChanges.Count  -eq 0 -and
+            $pbipSMDeletions.Count -eq 0 -and
+            $pbipRptDeletions.Count -eq 0
+          ) {
+              Write-Host "No changes detected. Exiting pipeline."
+              exit 0
+          }
+
+          ##############################################################################
+          # 3) Get UAT Workspace
+          ##############################################################################
+          Write-Host "=== Retrieving UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+          if (-not $workspaceObj) {
+              Write-Error "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+              throw "Workspace not found."
+          }
+          $workspaceID = $workspaceObj.Id
+
+          # Helper function to import a semantic model
+          function Import-SemanticModel($modelPath, $wsID) {
+              Write-Host ("Importing semantic model from {0} into UAT workspace." -f $modelPath)
+              try {
+                  $smItem = Import-FabricItem -workspaceId $wsID -path $modelPath
+                  Write-Host "Semantic model imported successfully."
+                  return $smItem
+              } catch {
+                  $err = $_
+                  Write-Error ("Failed to import semantic model at {0}: {1}" -f $modelPath, $err)
+                  throw $err
+              }
+          }
+
+          ##############################################################################
+          # 4) Import Changed Semantic Models (PBISM)
+          ##############################################################################
+          if ($pbipSMChanges.Count -gt 0) {
+              Write-Host "=== Importing Changed Semantic Models ==="
+              $smPathsToPromote = @()
+              $filter = "*.pbism"
+              foreach ($smChange in $pbipSMChanges) {
+                  $parentFolder = Split-Path $smChange -Parent
+                  # Search upward until we find the folder containing *.pbism
+                  while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                      $parentFolder = Split-Path $parentFolder -Parent
+                  }
+                  $smPathsToPromote += $parentFolder
+              }
+              $smPathsToPromote = $smPathsToPromote | Sort-Object -Unique
+
+              foreach ($smFolder in $smPathsToPromote) {
+                  Import-SemanticModel $smFolder $workspaceID | Out-Null
+              }
+          } else {
+              Write-Host "No semantic model changes. Skipping SM import."
+          }
+
+          # Optional: If you want to handle PBISM deletions, do it here
+          if ($pbipSMDeletions.Count -gt 0) {
+              Write-Host "=== Handling Deleted Semantic Models ==="
+              foreach ($deletedSM in $pbipSMDeletions) {
+                  Write-Host ("Deleted PBISM file detected: {0}" -f $deletedSM)
+                  # Optionally parse name/ID from the folder, remove from workspace via Remove-FabricItem, etc.
+              }
+          }
+
+          ##############################################################################
+          # 5) Import Changed Reports (PBIR)
+          ##############################################################################
+          if ($pbipRptChanges.Count -gt 0) {
+              Write-Host "=== Importing Changed Reports ==="
+              $itemsJson = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+              $allItems  = $itemsJson
+
+              foreach ($rptChange in $pbipRptChanges) {
+                  $parentFolder = Split-Path $rptChange -Parent
+                  $filter = "*.pbir"
+                  while ($null -ne $parentFolder -and !(-Test-Path (Join-Path $parentFolder $filter))) {
+                      $parentFolder = Split-Path $parentFolder -Parent
+                  }
+
+                  if ($parentFolder -ne $null) {
+                      # 1. Load Report Definition
+                      $def = Get-ChildItem -Path $parentFolder -Recurse -Include "definition.pbir"
+                      if ($null -eq $def) {
+                          Write-Error ("No definition.pbir found in {0}" -f $parentFolder)
+                          throw "Report definition not found."
+                      }
+                      $reportDefinition = Get-Content $def.FullName | ConvertFrom-Json
+                      $smPathRef = $reportDefinition.datasetReference.byPath
+                      if ($null -eq $smPathRef) {
+                          Write-Error "Report definition missing datasetReference.byPath"
+                          throw "No semantic model path for the report."
+                      }
+
+                      # 2. Check if the semantic model is newly changed or already in UAT
+                      $pathToCheck = Join-Path $parentFolder $smPathRef.path
+                      $pbismFile   = Get-ChildItem -Path $pathToCheck -Recurse -Include "*.pbism"
+
+                      $semanticModelId = $null
+                      if ($pbismFile) {
+                          # We have a local .pbism, so re-import to ensure it's up to date
+                          $reImportedSM = Import-SemanticModel $pbismFile.DirectoryName $workspaceID
+                          $semanticModelId = $reImportedSM.id
+                          Write-Host ("Semantic Model re-imported: {0}" -f $reImportedSM.displayName)
+                      }
+                      else {
+                          # The SM is not changed locally, so let's reuse the existing one in UAT
+                          $semanticModelName = Split-Path $pathToCheck -Leaf
+                          $existingSM = $allItems | Where-Object {
+                              $_.type -eq "PowerBIModel" -and $_.displayName -eq $semanticModelName
+                          }
+                          if ($existingSM) {
+                              Write-Host "Using existing semantic model in UAT: $($existingSM.displayName)"
+                              $semanticModelId = $existingSM.id
+                          }
+                          else {
+                              Write-Error ("Cannot find existing semantic model '{0}' in UAT. Aborting." -f $semanticModelName)
+                              throw "Missing dataset in UAT for this report reference."
+                          }
+                      }
+
+                      # 3. Import the Report
+                      if (-not $semanticModelId) {
+                          Write-Error "No semantic model ID found; cannot import report."
+                          throw "Semantic model for the report not found."
+                      }
+
+                      Write-Host ("Importing report from {0} to UAT with SM ID: {1}" -f $parentFolder, $semanticModelId)
+                      try {
+                          Import-FabricItem -workspaceId $workspaceID -path $parentFolder -itemProperties @{ semanticModelId = $semanticModelId } | Out-Null
+                          Write-Host "Report imported successfully."
+                      } catch {
+                          $err = $_
+                          Write-Error ("Failed to import report: {0}" -f $err)
+                          throw $err
+                      }
+                  }
+              }
+          } else {
+              Write-Host "No report changes detected. Skipping report import."
+          }
+
+          # Optional: If you want to handle PBIR deletions, do it here
+          if ($pbipRptDeletions.Count -gt 0) {
+              Write-Host "=== Handling Deleted Reports ==="
+              foreach ($deletedRpt in $pbipRptDeletions) {
+                  Write-Host ("Deleted PBIR file detected: {0}" -f $deletedRpt)
+                  # Optionally parse name/ID from the folder, remove from workspace.
+              }
+          }
+
+          Write-Host "=== Promotion to UAT completed successfully. ==="
+      }
+      catch {
+          $err = $_
+          Write-Error ("An error occurred in Promote-to-UAT step: {0}" -f $err)
+          throw $err
+      }
+  env:
+    CLIENT_SECRET: $(Clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
