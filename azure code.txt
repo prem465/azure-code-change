@@ -5633,7 +5633,7 @@ Write-Host "=== Detecting PBISM & PBIR Changes ==="
 
 
 ##############################################################################
-          # 2) Determine Commit Range (Using DevOps Variables)
+          # 2) Determine Git Diff Range from Azure DevOps Variables
           ##############################################################################
           $baseCommit = $env:Build_SourceVersionBase
           $headCommit = $env:Build_SourceVersion
@@ -5641,181 +5641,178 @@ Write-Host "=== Detecting PBISM & PBIR Changes ==="
           Write-Host "Base commit:   $baseCommit"
           Write-Host "Current commit:$headCommit"
 
+          # Fallback logic if variables are empty or identical:
           if ([string]::IsNullOrWhiteSpace($baseCommit) -or [string]::IsNullOrWhiteSpace($headCommit)) {
-            Write-Warning "Build.SourceVersionBase or Build.SourceVersion is empty."
-            Write-Warning "Falling back to HEAD~1..HEAD logic..."
-            # Attempt a fallback
+            Write-Warning "Build.SourceVersionBase or Build.SourceVersion not set."
+            Write-Warning "Falling back to HEAD~1..HEAD if possible..."
+
             if ((git rev-parse HEAD~1 2>$null) -and ($LASTEXITCODE -eq 0)) {
               $baseCommit = "HEAD~1"
               $headCommit = "HEAD"
-            } else {
-              # If we can't do HEAD~1, fallback to HEAD..HEAD
-              Write-Warning "HEAD~1 not found. Using HEAD..HEAD for diff."
+            }
+            else {
+              Write-Warning "Could not find HEAD~1. Using HEAD..HEAD."
               $baseCommit = "HEAD"
             }
           }
           elseif ($baseCommit -eq $headCommit) {
-            Write-Warning "SourceVersionBase and SourceVersion are the same. Possibly a single commit."
-            Write-Warning "Falling back to HEAD~1..HEAD logic..."
+            Write-Warning "SourceVersionBase == SourceVersion => Single commit scenario."
             if ((git rev-parse HEAD~1 2>$null) -and ($LASTEXITCODE -eq 0)) {
               $baseCommit = "HEAD~1"
               $headCommit = "HEAD"
-            } else {
+            }
+            else {
               $baseCommit = "HEAD"
             }
           }
 
-          $diffRange = "$baseCommit $headCommit"
-          Write-Host "Using git diff range: $diffRange"
-          
+          Write-Host "Using git diff range: $baseCommit $headCommit"
+
           ##############################################################################
-          # 3) Detect Changes (Add/Mod + Deletions) - PBISM & PBIR
+          # 3) Detect Changes (Added/Modified + Deletions)
           ##############################################################################
           Write-Host "=== Detecting PBISM & PBIR Changes ==="
+          $pbismAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- '**/*.pbism')
+          $pbirAddMod  = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- '**/*.pbir')
 
-          $pbipSMAddedModified = @(git diff --name-only --relative --diff-filter=AM $diffRange -- '**/*.pbism')
-          $pbipRptAddedModified= @(git diff --name-only --relative --diff-filter=AM $diffRange -- '**/*.pbir')
-
-          $pbipSMDeleted       = @(git diff --name-only --relative --diff-filter=D  $diffRange -- '**/*.pbism')
-          $pbipRptDeleted      = @(git diff --name-only --relative --diff-filter=D  $diffRange -- '**/*.pbir')
+          $pbismDel    = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- '**/*.pbism')
+          $pbirDel     = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- '**/*.pbir')
 
           # Sort & unique
-          $pbipSMAddedModified = $pbipSMAddedModified | Sort-Object -Unique
-          $pbipRptAddedModified= $pbipRptAddedModified | Sort-Object -Unique
-          $pbipSMDeleted       = $pbipSMDeleted | Sort-Object -Unique
-          $pbipRptDeleted      = $pbipRptDeleted | Sort-Object -Unique
+          $pbismAddMod = $pbismAddMod | Sort-Object -Unique
+          $pbirAddMod  = $pbirAddMod  | Sort-Object -Unique
+          $pbismDel    = $pbismDel    | Sort-Object -Unique
+          $pbirDel     = $pbirDel     | Sort-Object -Unique
 
-          # Print
-          Write-Host "PBISM add/modify: $($pbipSMAddedModified -join ', ')"
-          Write-Host "PBIR add/modify:  $($pbipRptAddedModified -join ', ')"
-          Write-Host "PBISM deleted:    $($pbipSMDeleted -join ', ')"
-          Write-Host "PBIR deleted:     $($pbipRptDeleted -join ', ')"
+          # Print for debugging
+          Write-Host "PBISM Add/Mod: $($pbismAddMod -join ', ')"
+          Write-Host "PBIR Add/Mod:  $($pbirAddMod -join ', ')"
+          Write-Host "PBISM Deleted: $($pbismDel -join ', ')"
+          Write-Host "PBIR Deleted:  $($pbirDel -join ', ')"
 
           if (
-            $pbipSMAddedModified.Count   -eq 0 -and
-            $pbipRptAddedModified.Count  -eq 0 -and
-            $pbipSMDeleted.Count         -eq 0 -and
-            $pbipRptDeleted.Count        -eq 0
+            $pbismAddMod.Count -eq 0 -and
+            $pbirAddMod.Count  -eq 0 -and
+            $pbismDel.Count    -eq 0 -and
+            $pbirDel.Count     -eq 0
           ) {
             Write-Host "No changes detected. Exiting pipeline."
             exit 0
           }
 
           ##############################################################################
-          # 4) Get UAT Workspace
+          # 4) Retrieve UAT Workspace
           ##############################################################################
           Write-Host "=== Retrieving UAT Workspace ==="
           $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
           if (-not $workspaceObj) {
-              throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+            throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
           }
           $workspaceID = $workspaceObj.Id
 
-          # Helper function
-          function Import-SemanticModel($path, $wsId) {
-            Write-Host "Importing semantic model from $path ..."
-            try {
-              $sm = Import-FabricItem -workspaceId $wsId -path $path
-              Write-Host "Semantic model imported successfully: $($sm.displayName)"
-              return $sm
-            } catch {
-              throw $_
+          # Helper to import semantic model
+          function Import-SemanticModel($smFolder, $wsId) {
+            Write-Host "Importing semantic model from $smFolder..."
+            $smItem = Import-FabricItem -workspaceId $wsId -path $smFolder
+            Write-Host "Semantic model imported: $($smItem.displayName)"
+            return $smItem
+          }
+
+          ##############################################################################
+          # 5) Process Semantic Model Changes
+          ##############################################################################
+          # A) Added or Modified
+          if ($pbismAddMod.Count -gt 0) {
+            Write-Host "=== Importing Changed Semantic Models ==="
+            $smFolders = @()
+            foreach ($file in $pbismAddMod) {
+              $dir = Split-Path $file -Parent
+              while ($dir -and !(Test-Path (Join-Path $dir '*.pbism'))) {
+                $dir = Split-Path $dir -Parent
+              }
+              if ($dir) { $smFolders += $dir }
+            }
+            $smFolders = $smFolders | Sort-Object -Unique
+
+            foreach ($smFolder in $smFolders) {
+              Import-SemanticModel $smFolder $workspaceID | Out-Null
+            }
+          }
+
+          # B) Deleted
+          if ($pbismDel.Count -gt 0) {
+            Write-Host "=== Handling Deleted Semantic Models ==="
+            foreach ($deletedFile in $pbismDel) {
+              Write-Host "Deleted PBISM file: $deletedFile"
+              # If you want to remove from workspace, do Remove-FabricItem ...
             }
           }
 
           ##############################################################################
-          # 5) Import or Remove Semantic Models
+          # 6) Process Report Changes
           ##############################################################################
-          if ($pbipSMAddedModified.Count -gt 0) {
-              Write-Host "=== Importing Changed Semantic Models ==="
-              $uniqueSMFolders = @()
-              foreach ($smFile in $pbipSMAddedModified) {
-                  $folder = Split-Path $smFile -Parent
-                  while ($folder -and !(Test-Path (Join-Path $folder '*.pbism'))) {
-                      $folder = Split-Path $folder -Parent
-                  }
-                  if ($folder) { $uniqueSMFolders += $folder }
-              }
-              $uniqueSMFolders = $uniqueSMFolders | Sort-Object -Unique
+          if ($pbirAddMod.Count -gt 0) {
+            Write-Host "=== Importing Changed Reports ==="
+            $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
 
-              foreach ($smFolder in $uniqueSMFolders) {
-                  Import-SemanticModel $smFolder $workspaceID | Out-Null
+            foreach ($rptFile in $pbirAddMod) {
+              $rptDir = Split-Path $rptFile -Parent
+              while ($rptDir -and !(Test-Path (Join-Path $rptDir '*.pbir'))) {
+                $rptDir = Split-Path $rptDir -Parent
               }
+              if (-not $rptDir) { continue }
+
+              # Load definition
+              $defFile = Get-ChildItem -Path $rptDir -Recurse -Include "definition.pbir"
+              if (-not $defFile) {
+                throw "No definition.pbir found in $rptDir"
+              }
+              $reportDef = Get-Content $defFile.FullName | ConvertFrom-Json
+              $smPathRef = $reportDef.datasetReference.byPath
+              if (-not $smPathRef) {
+                throw "Report definition missing datasetReference.byPath"
+              }
+
+              # Possibly re-import local pbism
+              $fullPath   = Join-Path $rptDir $smPathRef.path
+              $localSM    = Get-ChildItem -Path $fullPath -Recurse -Include "*.pbism"
+              $semanticId = $null
+
+              if ($localSM) {
+                # Re-import
+                Write-Host "Re-importing semantic model for the updated report..."
+                $smImported = Import-SemanticModel $($localSM.DirectoryName) $workspaceID
+                $semanticId = $smImported.id
+              } else {
+                # Reuse existing dataset
+                $smName   = Split-Path $fullPath -Leaf
+                $existing = $allItems | Where-Object {
+                  $_.type -eq "PowerBIModel" -and $_.displayName -eq $smName
+                }
+                if ($existing) {
+                  $semanticId = $existing.id
+                  Write-Host "Using existing SM: $($existing.displayName) [ID=$($existing.id)]"
+                } else {
+                  throw "Cannot find existing semantic model '$smName' in UAT. Aborting."
+                }
+              }
+
+              if (-not $semanticId) {
+                throw "No semantic model ID found. Cannot import report."
+              }
+
+              Write-Host "Importing report from $rptDir with SM ID=$semanticId"
+              Import-FabricItem -workspaceId $workspaceID -path $rptDir -itemProperties @{ semanticModelId = $semanticId } | Out-Null
+              Write-Host "Report imported successfully."
+            }
           }
 
-          if ($pbipSMDeleted.Count -gt 0) {
-              Write-Host "=== Handling Deleted Semantic Models ==="
-              foreach ($deletedSM in $pbipSMDeleted) {
-                Write-Host "PBISM file was deleted: $deletedSM"
-                # Optionally call Remove-FabricItem if you can map the file name to the model name in UAT.
-              }
-          }
-
-          ##############################################################################
-          # 6) Import or Remove Reports
-          ##############################################################################
-          if ($pbipRptAddedModified.Count -gt 0) {
-              Write-Host "=== Importing Changed Reports ==="
-              $allWorkspaceItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
-
-              foreach ($rptFile in $pbipRptAddedModified) {
-                  $rptFolder = Split-Path $rptFile -Parent
-                  while ($rptFolder -and !(Test-Path (Join-Path $rptFolder '*.pbir'))) {
-                      $rptFolder = Split-Path $rptFolder -Parent
-                  }
-                  if (-not $rptFolder) { continue }
-
-                  # Load definition.pbir
-                  $def = Get-ChildItem -Path $rptFolder -Recurse -Include "definition.pbir"
-                  if (-not $def) {
-                    Write-Error "No definition.pbir found under $rptFolder"
-                    throw "Report definition missing."
-                  }
-                  $reportDef = Get-Content $def.FullName | ConvertFrom-Json
-                  $smPathRef = $reportDef.datasetReference.byPath
-                  if (-not $smPathRef) {
-                    throw "Report definition missing datasetReference.byPath."
-                  }
-
-                  # Possibly import local pbism if changed
-                  $smFullPath = Join-Path $rptFolder $smPathRef.path
-                  $localSM = Get-ChildItem -Path $smFullPath -Recurse -Include "*.pbism"
-                  $smId = $null
-
-                  if ($localSM) {
-                      Write-Host "Re-importing semantic model for updated report..."
-                      $imported = Import-SemanticModel $localSM.DirectoryName $workspaceID
-                      $smId     = $imported.id
-                  } else {
-                      # Reuse existing dataset if it already exists
-                      $smName   = Split-Path $smFullPath -Leaf
-                      $existing = $allWorkspaceItems | Where-Object {
-                          $_.type -eq "PowerBIModel" -and $_.displayName -eq $smName
-                      }
-                      if ($existing) {
-                        $smId = $existing.id
-                        Write-Host "Using existing SM: $($existing.displayName) [ID=$($existing.id)]"
-                      } else {
-                        throw "Cannot find existing semantic model '$smName' in UAT. Aborting report import."
-                      }
-                  }
-
-                  if (-not $smId) {
-                    throw "No semantic model ID found for $rptFolder. Cannot import report."
-                  }
-
-                  Write-Host "Importing report from $rptFolder [SM ID=$smId]"
-                  Import-FabricItem -workspaceId $workspaceID -path $rptFolder -itemProperties @{ semanticModelId = $smId } | Out-Null
-                  Write-Host "Report imported successfully."
-              }
-          }
-
-          if ($pbipRptDeleted.Count -gt 0) {
-              Write-Host "=== Handling Deleted Reports ==="
-              foreach ($deletedRpt in $pbipRptDeleted) {
-                Write-Host "PBIR file was deleted: $deletedRpt"
-                # Optionally call Remove-FabricItem ...
-              }
+          if ($pbirDel.Count -gt 0) {
+            Write-Host "=== Handling Deleted Reports ==="
+            foreach ($deletedRpt in $pbirDel) {
+              Write-Host "Deleted PBIR file: $deletedRpt"
+              # Possibly Remove-FabricItem ...
+            }
           }
 
           Write-Host "=== Promotion to UAT completed successfully. ==="
