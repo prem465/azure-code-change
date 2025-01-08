@@ -6023,3 +6023,169 @@ $baseCommit = $env:Build_SourceVersionBase
         Write-Error ("Error in Promote-to-UAT: {0}" -f $err)
         throw $err
       }
+-------------------.json----------------------------------
+
+$baseCommit = $env:Build_SourceVersionBase
+          $headCommit = $env:Build_SourceVersion
+          Write-Host "Base commit:   $baseCommit"
+          Write-Host "Current commit:$headCommit"
+
+          if ([string]::IsNullOrWhiteSpace($baseCommit) -or [string]::IsNullOrWhiteSpace($headCommit)) {
+            Write-Warning "Build.SourceVersionBase or Build.SourceVersion not set. Falling back to HEAD~1..HEAD."
+            if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+              $baseCommit = "HEAD~1"
+              $headCommit = "HEAD"
+            } else {
+              Write-Warning "HEAD~1 not found, fallback to HEAD..HEAD."
+              $baseCommit = "HEAD"
+            }
+          }
+          elseif ($baseCommit -eq $headCommit) {
+            Write-Warning "Base == Head, single commit scenario, falling back to HEAD~1..HEAD..."
+            if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+              $baseCommit = "HEAD~1"
+              $headCommit = "HEAD"
+            } else {
+              $baseCommit = "HEAD"
+            }
+          }
+
+          Write-Host "Using git diff range: $baseCommit..$headCommit"
+
+          ##############################################################################
+          # 3) Detect Changes (Add/Mod + Deletions) for .pbir, .pbism, .json, .pbix
+          ##############################################################################
+          Write-Host "=== Detecting Changes ==="
+
+          # Patterns for reports
+          $reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
+          # Patterns for semantic models
+          $semanticPatterns = @('**/*.pbism')
+
+          $reportAddedMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns)
+          $reportDeleted  = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $reportPatterns)
+          $modelAddedMod  = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $semanticPatterns)
+          $modelDeleted   = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $semanticPatterns)
+
+          # Sort & unique
+          $reportAddedMod = $reportAddedMod | Sort-Object -Unique
+          $reportDeleted  = $reportDeleted  | Sort-Object -Unique
+          $modelAddedMod  = $modelAddedMod  | Sort-Object -Unique
+          $modelDeleted   = $modelDeleted   | Sort-Object -Unique
+
+          Write-Host "Reports Added/Mod: $($reportAddedMod -join ', ')"
+          Write-Host "Reports Deleted:   $($reportDeleted -join ', ')"
+          Write-Host "Models Added/Mod:  $($modelAddedMod -join ', ')"
+          Write-Host "Models Deleted:    $($modelDeleted -join ', ')"
+
+          $totalChanges = $reportAddedMod.Count + $reportDeleted.Count + $modelAddedMod.Count + $modelDeleted.Count
+          if ($totalChanges -eq 0) {
+            Write-Host "No changes detected. Exiting pipeline."
+            exit 0
+          }
+
+          ##############################################################################
+          # 4) Retrieve UAT Workspace
+          ##############################################################################
+          Write-Host "=== Retrieving UAT Workspace ==="
+          $workspaceObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+          if (-not $workspaceObj) {
+            throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+          }
+          $workspaceID = $workspaceObj.Id
+
+          # Helper function to import semantic model
+          function Import-SemanticModel($smFolder, $wsId) {
+            Write-Host "Importing semantic model from $smFolder..."
+            $item = Import-FabricItem -workspaceId $wsId -path $smFolder
+            Write-Host "Imported SM: $($item.displayName)"
+            return $item
+          }
+
+          ##############################################################################
+          # 5) Import or Remove Semantic Models
+          ##############################################################################
+          if ($modelAddedMod.Count -gt 0) {
+            Write-Host "=== Importing Changed Semantic Models ==="
+            $smFolders = @()
+            foreach ($mFile in $modelAddedMod) {
+              $dir = Split-Path $mFile -Parent
+              while ($dir -and !(Test-Path (Join-Path $dir '*.pbism'))) {
+                $dir = Split-Path $dir -Parent
+              }
+              if ($dir) { $smFolders += $dir }
+            }
+            $smFolders = $smFolders | Sort-Object -Unique
+            foreach ($smf in $smFolders) {
+              Import-SemanticModel $smf $workspaceID | Out-Null
+            }
+          }
+
+          if ($modelDeleted.Count -gt 0) {
+            Write-Host "=== Handling Deleted Semantic Models ==="
+            foreach ($dMod in $modelDeleted) {
+              Write-Host "Semantic Model deleted: $dMod"
+              # Optionally Remove-FabricItem ...
+            }
+          }
+
+          ##############################################################################
+          # 6) Import or Remove Reports (.pbir, .pbix, .json)
+          ##############################################################################
+          if ($reportAddedMod.Count -gt 0) {
+            Write-Host "=== Importing Changed Reports ==="
+            $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
+            foreach ($rFile in $reportAddedMod) {
+              Write-Host "Processing changed report file: $rFile"
+              $dir = Split-Path $rFile -Parent
+              # if it's .pbix or .json, you may handle it differently than .pbir
+              # For now, let's treat them similarly, calling Import-FabricItem
+              # But if you have a separate process for .pbix, adapt that here
+
+              if ($rFile -like '*.pbir') {
+                # Existing logic if your pipeline requires you to parse 'definition.pbir'
+                $defFile = Get-ChildItem -Path $dir -Recurse -Include 'definition.pbir'
+                if ($defFile) {
+                  # parse datasetReference, import or reimport SM, etc...
+                  # your existing .pbir logic here
+                }
+                else {
+                  # fallback: directly import the folder
+                  Write-Host "No definition.pbir found, importing folder as-is."
+                }
+                # Example direct import
+                Import-FabricItem -workspaceId $workspaceID -path $dir | Out-Null
+                Write-Host "Report imported successfully (.pbir)."
+              }
+              elseif ($rFile -like '*.pbix') {
+                # If you want to import PBIX, you might do:
+                Import-FabricItem -workspaceId $workspaceID -path $dir | Out-Null
+                Write-Host "Report imported successfully (.pbix)."
+              }
+              elseif ($rFile -like '*.json') {
+                # If your .json represents a Power BI report, adapt accordingly
+                Import-FabricItem -workspaceId $workspaceID -path $dir | Out-Null
+                Write-Host "Report imported successfully (.json)."
+              }
+              else {
+                Write-Host "Unrecognized file extension for $rFile. Skipping..."
+              }
+            }
+          }
+
+          if ($reportDeleted.Count -gt 0) {
+            Write-Host "=== Handling Deleted Reports ==="
+            foreach ($dRpt in $reportDeleted) {
+              Write-Host "Report file deleted: $dRpt"
+              # Optionally Remove-FabricItem ...
+            }
+          }
+
+          Write-Host "=== Promotion to UAT completed successfully. ==="
+      }
+      catch {
+        $err = $_
+        Write-Error ("An error occurred: {0}" -f $err)
+        throw $err
+      }
