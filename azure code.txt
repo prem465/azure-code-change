@@ -6193,8 +6193,8 @@ $baseCommit = $env:Build_SourceVersionBase
 
 $baseCommit = $env:Build_SourceVersionBase
           $headCommit = $env:Build_SourceVersion
-          if ([string]::IsNullOrWhiteSpace($baseCommit) -or [string]::IsNullOrWhiteSpace($headCommit)) {
-            Write-Warning "Fallback to HEAD~1..HEAD."
+          if (-not $baseCommit -or -not $headCommit) {
+            Write-Warning "Falling back to HEAD~1..HEAD"
             if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
               $baseCommit = "HEAD~1"
               $headCommit = "HEAD"
@@ -6203,7 +6203,7 @@ $baseCommit = $env:Build_SourceVersionBase
             }
           }
           elseif ($baseCommit -eq $headCommit) {
-            Write-Warning "Same commit. Fallback to HEAD~1..HEAD."
+            Write-Warning "Same commit => fallback HEAD~1..HEAD"
             if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
               $baseCommit = "HEAD~1"
               $headCommit = "HEAD"
@@ -6211,14 +6211,14 @@ $baseCommit = $env:Build_SourceVersionBase
               $baseCommit = "HEAD"
             }
           }
-          Write-Host "Using range: $baseCommit..$headCommit"
+          Write-Host "Comparing $baseCommit..$headCommit"
 
           ##############################################################################
-          # 3) Detect .pbir, .pbism, .json, .pbix Changes
+          # 3) Detect Changes (Reports & Models)
           ##############################################################################
           Write-Host "=== Detecting Changes ==="
-          $reportPatterns   = @('**/*.pbir','**/*.pbix','**/*.json')
-          $modelPatterns    = @('**/*.pbism')
+          $reportPatterns = @('**/*.pbir', '**/*.pbix', '**/*.json')
+          $modelPatterns  = @('**/*.pbism')
 
           $reportAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns)
           $reportDel    = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $reportPatterns)
@@ -6231,9 +6231,9 @@ $baseCommit = $env:Build_SourceVersionBase
           $modelDel     = $modelDel     | Sort-Object -Unique
 
           Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
-          Write-Host "Reports Deleted: $($reportDel -join ', ')"
+          Write-Host "Reports Del    : $($reportDel -join ', ')"
           Write-Host "Models Add/Mod : $($modelAddMod -join ', ')"
-          Write-Host "Models Deleted : $($modelDel -join ', ')"
+          Write-Host "Models Del     : $($modelDel -join ', ')"
 
           $totalChanges = $reportAddMod.Count + $reportDel.Count + $modelAddMod.Count + $modelDel.Count
           if ($totalChanges -eq 0) {
@@ -6242,146 +6242,121 @@ $baseCommit = $env:Build_SourceVersionBase
           }
 
           ##############################################################################
-          # 4) Get UAT Workspace
+          # 4) Retrieve UAT Workspace
           ##############################################################################
           Write-Host "=== Retrieving UAT Workspace ==="
           $wsObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
-          if (-not $wsObj) { throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found." }
+          if (-not $wsObj) {
+            throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+          }
           $workspaceID = $wsObj.Id
 
-          # Helper: Import-SemanticModel
-          function Import-SemanticModel($folderPath, $wsId) {
-            Write-Host ("Importing semantic model from {0}" -f $folderPath)
-            $item = Import-FabricItem -workspaceId $wsId -path $folderPath
-            Write-Host "Semantic model imported => $($item.displayName)"
-            return $item
+          # Helper to import a local .pbism => returns the new ID
+          function Import-LocalSemanticModel($modelFile, $workspaceID) {
+            Write-Host "Importing local SM => $($modelFile.FullName)"
+            $smFolder = Split-Path $modelFile.FullName -Parent
+            $imp = Import-FabricItem -workspaceId $workspaceID -path $smFolder
+            Write-Host "Semantic Model imported => $($imp.displayName) [Id=$($imp.id)]"
+            return $imp.id
           }
 
+          # Helper to find an existing model in the workspace by name
+          function Find-ExistingSemanticModel($modelName, $allItems) {
+            $found = $allItems | Where-Object {
+              $_.type -eq "PowerBIModel" -and $_.displayName -eq $modelName
+            }
+            return $found
+          }
+
+          # We'll load all items in the workspace once
+          $allWsItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
           ##############################################################################
-          # 5) Import or Remove Semantic Models First
+          # 5) ALWAYS get a semanticModelId for each changed report
           ##############################################################################
-          if ($modelAddMod.Count -gt 0) {
-            Write-Host "=== Importing Changed Semantic Models ==="
-            $smFolders = @()
-            foreach ($mfile in $modelAddMod) {
-              $dir = Split-Path $mfile -Parent
-              while ($dir -and !(Test-Path (Join-Path $dir '*.pbism'))) {
-                $dir = Split-Path $dir -Parent
+          # We'll define a function that, given a changed report file path, finds or imports a SM
+          function Resolve-SemanticModelIdForReport($reportFile, $workspaceID) {
+            # Example naming: 
+            #   "report 30.Report" <-> "report 30.SemanticModel"
+            # We'll find the base folder name and see if there's a corresponding .SemanticModel
+            $baseName = [System.IO.Path]::GetFileNameWithoutExtension($reportFile)  # e.g. "report 30"
+            # But if your folder is "report 30.Report/definition.pbir" => might parse differently
+            # If you're storing them at top-level as separate folders, you might do:
+            #   - "report 30.Report" => "report 30.SemanticModel"
+
+            # 1) Attempt local approach
+            # We'll guess that if we have "xyz.Report" => the model is "xyz.SemanticModel"
+            $modelFolderCandidate = $baseName.Replace(".Report", ".SemanticModel")
+            # That means "report 30.Report" -> "report 30.SemanticModel"
+
+            # We'll see if that folder actually exists in the repo
+            if (Test-Path $modelFolderCandidate) {
+              Write-Host "Found local SM folder: $modelFolderCandidate"
+              # We'll see if there's a .pbism in there
+              $modelFile = Get-ChildItem -Path $modelFolderCandidate -Recurse -Include '*.pbism' -File
+              if ($modelFile) {
+                # Import it
+                $smId = Import-LocalSemanticModel $modelFile[0] $workspaceID
+                return $smId
               }
-              if ($dir) { $smFolders += $dir }
             }
-            $smFolders = $smFolders | Sort-Object -Unique
-            foreach ($smFolder in $smFolders) {
-              Import-SemanticModel $smFolder $workspaceID | Out-Null
+            else {
+              Write-Host "No local semantic model folder found for $baseName => searching workspace..."
             }
-          }
 
-          if ($modelDel.Count -gt 0) {
-            Write-Host "=== Handling Deleted Semantic Models ==="
-            foreach ($delSM in $modelDel) {
-              Write-Host "Semantic model deleted: $delSM"
-              # Optionally remove from workspace
-              # Remove-FabricItem -workspaceId $workspaceID -itemName "..." -itemType "PowerBIModel"
+            # 2) If no local model, see if there's already a model in workspace by the same name
+            # e.g. "report 30" => "report 30" or "report 30.SemanticModel"? 
+            # Usually the displayName of the model might be "report 30", or "report 30.SemanticModel"
+            Write-Host "Looking for existing SM in workspace that matches $baseName or $modelFolderCandidate..."
+
+            $maybeModels = Find-ExistingSemanticModel $baseName $allWsItems
+            if (-not $maybeModels) {
+              # also try the "modelFolderCandidate"
+              $maybeModels = Find-ExistingSemanticModel $modelFolderCandidate $allWsItems
+            }
+            if ($maybeModels) {
+              # pick the first or do further filtering
+              $foundSM = $maybeModels | Select-Object -First 1
+              Write-Host "Found existing SM => $($foundSM.displayName) [Id=$($foundSM.id)]"
+              return $foundSM.id
+            }
+            else {
+              throw "Cannot find or import a semantic model for $reportFile => $baseName. Aborting."
             }
           }
 
           ##############################################################################
-          # 6) Import or Remove Reports (with semanticModelId resolution)
+          # 6) Import the changed report, passing semanticModelId
           ##############################################################################
           if ($reportAddMod.Count -gt 0) {
-            Write-Host "=== Importing Changed Reports ==="
-            # We'll get a list of existing items to find semantic models by name
-            $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+            Write-Host "=== Importing Changed Reports (with attached SM) ==="
+            foreach ($rFile in $reportAddMod) {
+              Write-Host "Handling changed report => $rFile"
+              $reportDir = Split-Path $rFile -Parent
 
-            foreach ($repFile in $reportAddMod) {
-              Write-Host "Processing changed report: $repFile"
-              $repDir = Split-Path $repFile -Parent
-
-              # If it's a PBIR style, parse 'definition.pbir' for datasetReference
-              if ($repFile -like '*.pbir') {
-                $defFile = Get-ChildItem -Path $repDir -Recurse -Include "definition.pbir"
-                if ($defFile) {
-                  $definition = Get-Content $defFile.FullName | ConvertFrom-Json
-                  $smPathRef  = $definition.datasetReference.byPath
-                  if (-not $smPathRef) {
-                    throw "Report definition missing datasetReference.byPath"
-                  }
-
-                  # Check for local .pbism
-                  $smFull = Join-Path $repDir $smPathRef.path
-                  $localSM = Get-ChildItem -Path $smFull -Recurse -Include '*.pbism'
-                  $smId    = $null
-
-                  if ($localSM) {
-                    Write-Host "Re-importing local semantic model => $($localSM.DirectoryName)"
-                    $impSM = Import-SemanticModel $($localSM.DirectoryName) $workspaceID
-                    $smId  = $impSM.id
-                  }
-                  else {
-                    # Possibly the SM is already in the workspace
-                    $smName = Split-Path $smFull -Leaf
-                    Write-Host "Looking for existing SM named '$smName' in UAT..."
-                    $existingSM = $allItems | Where-Object { 
-                      $_.type -eq "PowerBIModel" -and $_.displayName -eq $smName
-                    }
-                    if ($existingSM) {
-                      $smId = $existingSM.id
-                      Write-Host "Found existing SM: $($existingSM.displayName) [Id=$smId]"
-                    }
-                    else {
-                      throw "Cannot find or import SM for '$smName'. Aborting."
-                    }
-                  }
-
-                  if (-not $smId) { throw "No semanticModelId found. Cannot import .pbir." }
-
-                  # Finally import the report with the SM ID
-                  Write-Host "Importing PBIR from $repDir with SM ID=$smId"
-                  Import-FabricItem -workspaceId $workspaceID -path $repDir -itemProperties @{ semanticModelId = $smId } | Out-Null
-                  Write-Host "Report imported successfully."
-                }
-                else {
-                  Write-Host "No definition.pbir found. Attempting direct import..."
-                  # If your .pbir can be imported directly, do:
-                  Import-FabricItem -workspaceId $workspaceID -path $repDir | Out-Null
-                  Write-Host "Report imported. (Might fail if it references byPath SM!)"
-                }
-              }
-              elseif ($repFile -like '*.pbix') {
-                # PBIX typically doesn't require separate SM import, but you can adapt as needed
-                Write-Host "Importing PBIX from $repDir"
-                Import-FabricItem -workspaceId $workspaceID -path $repDir | Out-Null
-                Write-Host "PBIX imported successfully."
-              }
-              elseif ($repFile -like '*.json') {
-                # If your .json references a byPath dataset, parse & do the same logic
-                Write-Host "Importing JSON-based report from $repDir"
-                # Possibly parse it, find a 'datasetReference' if relevant, etc.
-                # If not referencing an SM, direct import might suffice:
-                Import-FabricItem -workspaceId $workspaceID -path $repDir | Out-Null
-                Write-Host "JSON-based report imported."
-              }
-              else {
-                Write-Host "Unknown extension for $repFile. Attempting direct import..."
-                Import-FabricItem -workspaceId $workspaceID -path $repDir | Out-Null
-                Write-Host "Report imported."
-              }
+              # Step A: find or import SM => get smId
+              $smId = Resolve-SemanticModelIdForReport $rFile $workspaceID
+              # Step B: import the report
+              Write-Host "Importing the report from $reportDir with SM ID=$smId"
+              Import-FabricItem -workspaceId $workspaceID -path $reportDir -itemProperties @{ semanticModelId = $smId } | Out-Null
+              Write-Host "Report imported successfully. Attached to SM=$smId"
             }
           }
 
-          # Handle report deletions if you want to remove them from workspace
+          # If you want to handle deleted reports => remove from workspace
           if ($reportDel.Count -gt 0) {
             Write-Host "=== Handling Deleted Reports ==="
-            foreach ($delRpt in $reportDel) {
-              Write-Host "Report file deleted: $delRpt"
-              # Possibly Remove-FabricItem ...
+            foreach ($delFile in $reportDel) {
+              Write-Host "Report file deleted => $delFile"
+              # Remove-FabricItem ...
             }
           }
 
-          Write-Host "=== Promotion to UAT completed successfully. ==="
+          # Models were handled above, if any changed or were deleted
+          Write-Host "=== Promotion to UAT completed successfully ==="
       }
       catch {
         $err = $_
-        Write-Error ("Error in Promote-to-UAT: {0}" -f $err)
+        Write-Error ("Error: {0}" -f $err)
         throw $err
       }
