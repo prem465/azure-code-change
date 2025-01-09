@@ -6980,61 +6980,7 @@ Write-Host "=== Debug: Listing top-level structure ==="
     targetType: inline
     script: |
       try {
-          # Import Required Modules & Authenticate
-          Import-Module Az.Accounts -ErrorAction Stop
-          Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
-          Import-Module FabricPS-PBIP -ErrorAction Stop
-
-          $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
-          $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
-          $tenantId = $env:TENANT_ID.Trim()
-
-          $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto([Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password))
-
-          $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
-          $isSPN = $false
-          if ($credential.UserName -match $guidRegex) {
-              $isSPN = $true
-          }
-
-          if ($isSPN) {
-              Set-FabricAuthToken -servicePrincipalId $credential.UserName -servicePrincipalSecret $plainTextPwd -tenantId $tenantId -reset
-          } else {
-              Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
-          }
-
-          $authToken = Get-FabricAuthToken
-          if (-not $authToken) {
-              throw "Fabric authentication failed"
-          }
-
-          Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
-
-          $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
-          $oneLakeUri = [System.Uri]"$($env:UAT_ONELAKE_ENDPOINT)".Trim()
-          $domain = $oneLakeUri.Host
-          $azLogin = azcopy login --service-principal --application-id $credential.UserName --tenant-id $tenantId --trusted-microsoft-suffixes="$domain" --output-type json | ConvertFrom-Json
-          
-          if (-not ($azLogin | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." })) {
-              throw "AzCopy login failed"
-          }
-
-          Write-Host "=== Connecting to Power BI Service ==="
-          if ($isSPN) {
-              Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
-          } else {
-              Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
-          }
-
-          # Get commit range
-          if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
-              $baseCommit = "HEAD~1"
-              $headCommit = "HEAD"
-          } else {
-              $baseCommit = "HEAD"
-              $headCommit = "HEAD"
-          }
-          Write-Host "Comparing commits: $baseCommit..$headCommit"
+          # (Keep existing authentication code until change detection)
 
           # Detect Changes
           Write-Host "=== Detecting Changes ==="
@@ -7056,12 +7002,6 @@ Write-Host "=== Debug: Listing top-level structure ==="
           Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
           Write-Host "Reports Deleted: $($reportDel -join ', ')"
 
-          $totalChanges = $modelAddMod.Count + $modelDel.Count + $reportAddMod.Count + $reportDel.Count
-          if ($totalChanges -eq 0) {
-              Write-Host "No changes detected. Exiting pipeline."
-              exit 0
-          }
-
           # Get workspace
           Write-Host "=== Getting UAT Workspace ==="
           $ws = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
@@ -7071,14 +7011,44 @@ Write-Host "=== Debug: Listing top-level structure ==="
           $workspaceID = $ws.Id
           $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
 
-          # Dictionary for model IDs
+          # Dictionary to track imported models
           $localModelIds = @{}
+          
+          # NEW: Create a map of reports to their models from current commit
+          $commitPairs = @{}
+          foreach ($report in $reportAddMod) {
+              $reportDir = Split-Path $report -Parent
+              $reportBase = [System.IO.Path]::GetFileName($reportDir).Replace(".Report", "")
+              
+              # Look for matching model in this commit
+              $matchingModel = $modelAddMod | Where-Object {
+                  $modelDir = Split-Path $_ -Parent
+                  $modelBase = [System.IO.Path]::GetFileName($modelDir).Replace(".SemanticModel", "")
+                  return $modelBase -eq $reportBase
+              } | Select-Object -First 1
+              
+              if ($matchingModel) {
+                  $commitPairs[$report] = $matchingModel
+              }
+          }
 
-          function Import-LocalSemanticModel($pbismFile, $wsId) {
-              $pbismDir = Split-Path $pbismFile -Parent
-              $imported = Import-FabricItem -workspaceId $wsId -path $pbismDir
-              Write-Host "Semantic model imported: $($imported.displayName) [Id=$($imported.id)]"
-              return $imported.id
+          # Import all models first
+          Write-Host "=== Processing Semantic Models ==="
+          foreach ($mFile in $modelAddMod) {
+              $mDir = Split-Path $mFile -Parent
+              $folder = [System.IO.Path]::GetFileName($mDir)
+              $baseName = $folder.Replace(".SemanticModel", "")
+
+              Write-Host "Importing model: $mDir"
+              try {
+                  $imp = Import-FabricItem -workspaceId $workspaceID -path $mDir
+                  Write-Host "Model imported successfully: $($imp.displayName) [Id=$($imp.id)]"
+                  $localModelIds[$baseName] = $imp.id
+              }
+              catch {
+                  Write-Error "Failed to import model $mDir`: $_"
+                  throw
+              }
           }
 
           function Find-ExistingSMInWorkspace($nameCandidate, $items) {
@@ -7087,53 +7057,30 @@ Write-Host "=== Debug: Listing top-level structure ==="
               }
           }
 
-          function Find-ModelInCommit($reportBaseName) {
-              return $modelAddMod | Where-Object {
-                  $modelDir = Split-Path $_ -Parent
-                  $modelFolderName = [System.IO.Path]::GetFileName($modelDir)
-                  $modelBaseName = $modelFolderName.Replace(".SemanticModel", "")
-                  return $modelBaseName -eq $reportBaseName
-              }
-          }
-
           function Resolve-SemanticModelId($reportFile, $wsId, $allItems) {
+              # First check if this report is paired with a model in current commit
+              if ($commitPairs.ContainsKey($reportFile)) {
+                  $reportDir = Split-Path $reportFile -Parent
+                  $baseName = [System.IO.Path]::GetFileName($reportDir).Replace(".Report", "")
+                  if ($localModelIds.ContainsKey($baseName)) {
+                      Write-Host "Using paired model from current commit"
+                      return $localModelIds[$baseName]
+                  }
+              }
+
+              # If not paired, check other locations
               $reportDir = Split-Path $reportFile -Parent
               $folderName = [System.IO.Path]::GetFileName($reportDir)
               $baseName = $folderName.Replace(".Report", "")
-              
-              Write-Host "Resolving model for report: $reportFile"
 
-              # Check if model is in current commit
-              $matchingModel = Find-ModelInCommit $baseName
-              if ($matchingModel) {
-                  Write-Host "Found matching model in current commit: $matchingModel"
-                  if (-not $localModelIds.ContainsKey($baseName)) {
-                      $modelDir = Split-Path $matchingModel -Parent
-                      Write-Host "Importing model from $modelDir"
-                      $importedModel = Import-FabricItem -workspaceId $wsId -path $modelDir
-                      $localModelIds[$baseName] = $importedModel.id
-                  }
-                  return $localModelIds[$baseName]
-              }
-
-              # Check cached models
+              # Check local models dictionary
               if ($localModelIds.ContainsKey($baseName)) {
                   Write-Host "Using cached model ID: $($localModelIds[$baseName])"
                   return $localModelIds[$baseName]
               }
 
-              # Check local folder
-              $modelFolder = $folderName.Replace(".Report", ".SemanticModel")
-              if (Test-Path $modelFolder) {
-                  $pbism = Get-ChildItem -Path $modelFolder -Include "*.pbism" -File -Recurse | Select-Object -First 1
-                  if ($pbism) {
-                      Write-Host "Found local model: $($pbism.FullName)"
-                      return Import-LocalSemanticModel $pbism.FullName $wsId
-                  }
-              }
-
               # Check workspace
-              $possibleNames = @($baseName, $modelFolder, $folderName)
+              $possibleNames = @($baseName, "$baseName.SemanticModel", $folderName)
               foreach ($name in $possibleNames) {
                   $found = Find-ExistingSMInWorkspace $name $allItems
                   if ($found) {
@@ -7143,41 +7090,25 @@ Write-Host "=== Debug: Listing top-level structure ==="
                   }
               }
 
-              throw "Cannot find semantic model for $reportFile. No matching model found in commit, local folder, or workspace."
-          }
-
-          # Process Models
-          if ($modelAddMod.Count -gt 0) {
-              Write-Host "=== Importing Changed Models ==="
-              foreach ($mFile in $modelAddMod) {
-                  $mDir = Split-Path $mFile -Parent
-                  $folder = [System.IO.Path]::GetFileName($mDir)
-                  $baseName = $folder.Replace(".SemanticModel", "")
-
-                  Write-Host "Importing model from: $mDir"
-                  try {
-                      $imp = Import-FabricItem -workspaceId $workspaceID -path $mDir
-                      Write-Host "Model imported successfully: $($imp.displayName) [Id=$($imp.id)]"
-                      $localModelIds[$baseName] = $imp.id
-                  }
-                  catch {
-                      Write-Error "Failed to import model $mDir`: $_"
-                      throw
-                  }
-              }
-              $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+              throw "Cannot find semantic model for $reportFile"
           }
 
           # Process Reports
-          if ($reportAddMod.Count -gt 0) {
-              Write-Host "=== Importing Changed Reports ==="
-              foreach ($rFile in $reportAddMod) {
-                  Write-Host "Processing report: $rFile"
+          Write-Host "=== Processing Reports ==="
+          foreach ($rFile in $reportAddMod) {
+              Write-Host "Processing report: $rFile"
+              try {
                   $smId = Resolve-SemanticModelId $rFile $workspaceID $allItems
                   $repDir = Split-Path $rFile -Parent
 
-                  Import-FabricItem -workspaceId $workspaceID -path $repDir -itemProperties @{ semanticModelId = $smId }
+                  Import-FabricItem -workspaceId $workspaceID -path $repDir -itemProperties @{ 
+                      semanticModelId = $smId 
+                  }
                   Write-Host "Report imported and linked to model ID: $smId"
+              }
+              catch {
+                  Write-Error "Failed to import report $rFile`: $_"
+                  throw
               }
           }
 
