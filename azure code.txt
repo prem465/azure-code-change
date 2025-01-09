@@ -7156,32 +7156,40 @@ Write-Host "=== Debug: Listing top-level structure ==="
 
 
         ############################################################################
-        # 4) Build dictionaries of model/report changes by "base" name
+        # 4) Build Dictionaries for Model/Report by Lowercase "Base" Name
         ############################################################################
-        $modelMap = @{}   # baseName => modelFolderPath
-        $reportMap = @{}  # baseName => reportFolderPath
+        #
+        # Example:
+        #   "BaseThemes.SemanticModel/definition.pbism" => base = "basethemes"
+        #   "BaseThemes.Report/something.pbir"         => base = "basethemes"
+        #
+        # We store them ignoring case in the dictionary keys, but keep the actual
+        # folder paths as values.
+
+        $modelMap  = @{}  # e.g. modelMap["basethemes"] = "C:\...\BaseThemes.SemanticModel"
+        $reportMap = @{}
 
         foreach ($mFile in $modelAddMod) {
           $mDir   = Split-Path $mFile -Parent
           $folder = Split-Path $mDir -Leaf
-          # e.g. "Basethemes.SemanticModel" => base="Basethemes"
-          $base = $folder -replace "\.SemanticModel$",""
-          if (-not $modelMap.ContainsKey($base)) {
-            $modelMap[$base] = $mDir
+          # e.g. "BaseThemes.SemanticModel" => "basethemes"
+          $baseLower = ($folder -replace "\.SemanticModel$","") .ToLower()
+          if (-not $modelMap.ContainsKey($baseLower)) {
+            $modelMap[$baseLower] = $mDir
           }
         }
 
         foreach ($rFile in $reportAddMod) {
           $rDir   = Split-Path $rFile -Parent
           $folder = Split-Path $rDir -Leaf
-          # e.g. "Basethemes.Report" => base="Basethemes"
-          $base = $folder -replace "\.Report$",""
-          if (-not $reportMap.ContainsKey($base)) {
-            $reportMap[$base] = $rDir
+          # e.g. "BaseThemes.Report" => "basethemes"
+          $baseLower = ($folder -replace "\.Report$","") .ToLower()
+          if (-not $reportMap.ContainsKey($baseLower)) {
+            $reportMap[$baseLower] = $rDir
           }
         }
 
-        # We'll store the newly imported model IDs here => $modelIds[base] = "GUID"
+        # We'll store newly imported model IDs: modelIds["basethemes"] = "GUID"
         $modelIds = @{}
 
 
@@ -7195,48 +7203,58 @@ Write-Host "=== Debug: Listing top-level structure ==="
           return $imported.id
         }
 
-        # Case-insensitive "Found existing model" logic
-        function Find-ExistingModel($baseName) {
+        # Case-insensitive search for an existing model in the workspace
+        function Find-ExistingModel($baseLower) {
+          # We'll compare .displayName.ToLower() == $baseLower
           $found = $allItems | Where-Object {
-            $_.type -eq "PowerBIModel" -and $_.displayName -ieq $baseName
+            $_.type -eq "PowerBIModel" -and ($_.displayName.ToLower() -eq $baseLower)
           }
           return $found
         }
 
-        # If only the report was changed, we try to find a matching model
-        function Fallback-ImportOrFindModel($reportBase) {
-          # 1) Check if there's a local "<reportBase>.SemanticModel" folder (case-insensitive)
-          $localModelFolderName = "$reportBase.SemanticModel"
-          Write-Host "Fallback: Checking if local folder '$localModelFolderName' exists..."
+        # If only the report was changed, we try to find or import the relevant model
+        function Fallback-ImportOrFindModel($baseLower) {
+          # 1) Check if there's an uncommitted local folder named "<anything>.SemanticModel"
+          #    whose "base" (ignoring case) matches $baseLower.
+          #
+          # We'll do a quick directory search (recursively) in the repo for a folder whose name
+          # minus ".SemanticModel" = $baseLower (ignoring case).
+          #
+          # Reason: The model might exist locally but wasn't changed in this commit.
 
-          # Because the filesystem might be case-sensitive or not, let's do a slightly more robust approach:
-          # We'll search up to one level for a folder that ends with ".SemanticModel" if you want.
-          # But let's keep it simple, we do direct check:
-          if (Test-Path $localModelFolderName) {
-            Write-Host "Fallback: found local folder => '$localModelFolderName'. Importing..."
-            return Import-Model $localModelFolderName
+          Write-Host "Fallback: Searching local folders ignoring case for '$baseLower.SemanticModel'"
+          $candidateModelDirs = Get-ChildItem -Directory -Recurse -ErrorAction SilentlyContinue | Where-Object {
+            # (e.g. "BaseThemes.SemanticModel" => "basethemes")
+            ($_.Name -replace "\.SemanticModel$","").ToLower() -eq $baseLower
           }
 
-          # 2) Otherwise, see if we have a model in the workspace named (case-insensitive) $reportBase
-          Write-Host "Fallback: Searching workspace for an existing model named '$reportBase' (case-insensitive)."
-          $found = Find-ExistingModel $reportBase
+          if ($candidateModelDirs -and $candidateModelDirs.Count -gt 0) {
+            # Just pick the first (or you could handle duplicates carefully)
+            $localFolder = $candidateModelDirs[0].FullName
+            Write-Host "Fallback: found local folder => '$localFolder'. Importing..."
+            return Import-Model $localFolder
+          }
+
+          # 2) Otherwise, see if we have a model in the workspace with displayName.ToLower() == $baseLower
+          Write-Host "Fallback: Searching workspace for an existing model named (case-insensitive) '$baseLower'"
+          $found = Find-ExistingModel $baseLower
           if ($found) {
             $f = $found | Select-Object -First 1
             Write-Host "Fallback: found existing model => $($f.displayName) [Id=$($f.id)]"
             return $f.id
           }
 
-          throw "Cannot find or import a semantic model for base='$reportBase' (fallback)."
+          throw "Cannot find or import a semantic model for base='$baseLower' (fallback)."
         }
 
 
         ############################################################################
-        # 6) Handle the "both" scenario first: model & report in the same commit
+        # 6) Handle the "both" scenario first (intersection of baseLower)
         ############################################################################
         $bothBases = $modelMap.Keys | Where-Object { $reportMap.ContainsKey($_) }
 
         foreach ($base in $bothBases) {
-          Write-Host "`n=== Both model & report committed for base='$base' ==="
+          Write-Host "`n=== Both model & report committed for base='$base' (ignore-case) ==="
           $modelFolder  = $modelMap[$base]
           $reportFolder = $reportMap[$base]
 
@@ -7292,7 +7310,7 @@ Write-Host "=== Debug: Listing top-level structure ==="
               Write-Host "Reusing newly imported modelId=$useModelId for base='$base'..."
             }
             else {
-              # Otherwise fallback: try local or existing workspace model
+              # Otherwise fallback: try local uncommitted folder or existing workspace model
               $useModelId = Fallback-ImportOrFindModel $base
               $modelIds[$base] = $useModelId
             }
@@ -7316,8 +7334,11 @@ Write-Host "=== Debug: Listing top-level structure ==="
             #
             # Example:
             #   $delFolder = Split-Path $delM -Parent
-            #   $delBase   = (Split-Path $delFolder -Leaf) -replace "\.SemanticModel$",""
-            #   $existing  = $allItems | Where-Object { $_.type -eq "PowerBIModel" -and $_.displayName -ieq $delBase }
+            #   $delName   = Split-Path $delFolder -Leaf  # "BaseThemes.SemanticModel"
+            #   $delBaseLower = ($delName -replace "\.SemanticModel$","").ToLower()
+            #   $existing = $allItems | Where-Object {
+            #       $_.type -eq "PowerBIModel" -and ($_.displayName.ToLower() -eq $delBaseLower)
+            #   }
             #   if ($existing) { Remove-FabricItem -workspaceId $workspaceID -itemId $existing.id }
           }
         }
@@ -7346,4 +7367,3 @@ Write-Host "=== Debug: Listing top-level structure ==="
     CLIENT_ID: $(clinetid)
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
-    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
