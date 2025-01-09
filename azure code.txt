@@ -7216,6 +7216,7 @@ Write-Host "=== Debug: Listing top-level structure ==="
           $baseCommit = "HEAD~1"
           $headCommit = "HEAD"
         } else {
+          # If there's no HEAD~1, compare HEAD to itself — effectively picks up any first commit
           $baseCommit = "HEAD"
           $headCommit = "HEAD"
         }
@@ -7242,47 +7243,157 @@ Write-Host "=== Debug: Listing top-level structure ==="
         Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
         Write-Host "Reports Deleted: $($reportDel -join ', ')"
 
-
-        #
-        # 4) Handle Both Report and Semantic Model Committed Together
-        #
-        if ($modelAddMod.Count -gt 0 -and $reportAddMod.Count -gt 0) {
-          Write-Host "Both Report and Semantic Model committed together. Directly promoting to UAT..."
-          foreach ($model in $modelAddMod) {
-            $modelDir = Split-Path $model -Parent
-            Import-FabricItem -workspaceId $workspaceID -path $modelDir
-            Write-Host "Model promoted: $model"
-          }
-
-          foreach ($report in $reportAddMod) {
-            $reportDir = Split-Path $report -Parent
-            Import-FabricItem -workspaceId $workspaceID -path $reportDir
-            Write-Host "Report promoted: $report"
-          }
-
+        $totalChanges = $modelAddMod.Count + $modelDel.Count + $reportAddMod.Count + $reportDel.Count
+        if ($totalChanges -eq 0) {
+          Write-Host "No changes detected. Exiting pipeline."
           exit 0
         }
 
         #
-        # 5) Handle Only Report Committed
+        # 4) Retrieve UAT Workspace
         #
-        function ResolveSemanticModel($reportDir, $workspaceItems) {
-          # Logic to resolve semantic model from local or workspace
-          # ...
+        $workspace = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+        if (-not $workspace) {
+          throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+        }
+        $workspaceID = $workspace.Id
+        $allItems    = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
+        #
+        # 5) Dictionary for newly imported model IDs
+        #
+        $modelIds = @{}  # e.g. $modelIds["report 38"] = "00000000-0000-0000-0000-000000000000"
+
+        #
+        # Helper to import .pbism
+        #
+        function Import-LocalSemanticModel($pbismFile, $wsId) {
+          $pbismDir = Split-Path $pbismFile -Parent
+          $imported = Import-FabricItem -workspaceId $wsId -path $pbismDir
+          Write-Host "Semantic model imported => $($imported.displayName) [Id=$($imported.id)]"
+          return $imported.id
         }
 
-        foreach ($report in $reportAddMod) {
-          $reportDir = Split-Path $report -Parent
-          $smId = ResolveSemanticModel $reportDir $allItems
-          Import-FabricItem -workspaceId $workspaceID -path $reportDir -itemProperties @{ semanticModelId = $smId }
-          Write-Host "Report promoted with Semantic Model: $report"
+        #
+        # Helper to find an existing model in workspace
+        #
+        function Find-ExistingSM($nameCandidate, $items) {
+          $found = $items | Where-Object {
+            $_.type -eq "PowerBIModel" -and $_.displayName -eq $nameCandidate
+          }
+          return $found
+        }
+
+        #
+        # 6) Import Changed Models first & store ID by "base" name
+        #
+        if ($modelAddMod.Count -gt 0) {
+          Write-Host "Importing changed semantic models..."
+          foreach ($mFile in $modelAddMod) {
+            # Example: if path is 'report 38.SemanticModel/definition.pbism'
+            $mDir   = Split-Path $mFile -Parent
+            $folder = [System.IO.Path]::GetFileName($mDir)
+            $base   = $folder.Replace(".SemanticModel","")
+
+            Write-Host "Importing model => $mDir"
+            $imported = Import-FabricItem -workspaceId $workspaceID -path $mDir
+            Write-Host "Model imported => $($imported.displayName) [Id=$($imported.id)]"
+
+            # Store the ID in dictionary for direct usage
+            $modelIds[$base] = $imported.id
+          }
+
+          # Refresh after model import
+          $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+        }
+
+        #
+        # 7) Handle model deletions if needed
+        #
+        if ($modelDel.Count -gt 0) {
+          foreach ($delM in $modelDel) {
+            Write-Host "Deleted model => $delM"
+            # TODO: If you want to actually remove from workspace, call Remove-FabricItem here.
+            #       For example:
+            #       # Derive the base name from the path, find the item in $allItems, then remove it.
+          }
+        }
+
+        #
+        # 8) Fallback function to find or import a model only if the model was NOT committed
+        #
+        function Fallback-ResolveSemanticModel($reportFile, $wsId, $allItems) {
+          $rDir   = Split-Path $reportFile -Parent
+          $folder = [System.IO.Path]::GetFileName($rDir)
+          $base   = $folder.Replace(".Report","")
+          $modelFold = $folder.Replace(".Report",".SemanticModel")
+
+          # If local folder for the model is present (and we didn't see it in modelAddMod?), we can import
+          if (Test-Path $modelFold) {
+            $pbism = Get-ChildItem -Path $modelFold -Recurse -Include '*.pbism' -File
+            if ($pbism) {
+              $importedModelId = Import-LocalSemanticModel $pbism[0].FullName $wsId
+              return $importedModelId
+            }
+          }
+
+          # Else search workspace
+          $candidates = @($base, $modelFold, $folder)
+          foreach ($cand in $candidates) {
+            $found = Find-ExistingSM $cand $allItems
+            if ($found) {
+              $f = $found | Select-Object -First 1
+              Write-Host "Found existing model => $($f.displayName) [Id=$($f.id)]"
+              return $f.id
+            }
+          }
+
+          throw "Cannot find or import a semantic model for $reportFile (fallback)."
+        }
+
+        #
+        # 9) Import changed reports
+        #
+        if ($reportAddMod.Count -gt 0) {
+          Write-Host "Importing changed reports..."
+          foreach ($rFile in $reportAddMod) {
+            $rDir   = Split-Path $rFile -Parent
+            $folder = [System.IO.Path]::GetFileName($rDir)
+            $base   = $folder.Replace(".Report","")
+
+            if ($modelIds.ContainsKey($base)) {
+              # We already imported a brand-new or changed SM in step 6 => Use that ID directly
+              Write-Host "Both model & report committed (or known) => using modelIds[$base] directly"
+              $smId = $modelIds[$base]
+            }
+            else {
+              # fallback scenario if only the report changed (or we didn't have a local model in $modelIds)
+              $smId = Fallback-ResolveSemanticModel $rFile $workspaceID $allItems
+            }
+
+            Import-FabricItem -workspaceId $workspaceID -path $rDir -itemProperties @{ semanticModelId = $smId } | Out-Null
+            Write-Host "Report imported => $rFile attached to SM=$smId"
+          }
+        }
+
+        #
+        # 10) Handle report deletions if needed
+        #
+        if ($reportDel.Count -gt 0) {
+          foreach ($delR in $reportDel) {
+            Write-Host "Deleted report => $delR"
+            # TODO: If you want to actually remove from workspace, call Remove-FabricItem here.
+            #       For example:
+            #       # Derive the base name from the path, find the item in $allItems, then remove it.
+          }
         }
 
         Write-Host "Promotion to UAT completed successfully."
       }
       catch {
-        Write-Error "ERROR: $_"
-        throw $_
+        $err = $_
+        Write-Error ("ERROR: {0}" -f $err)
+        throw $err
       }
   env:
     CLIENT_SECRET: $(Clientsecret)
@@ -7290,4 +7401,3 @@ Write-Host "=== Debug: Listing top-level structure ==="
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
-
