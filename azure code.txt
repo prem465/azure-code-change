@@ -6529,7 +6529,7 @@ Write-Host "=== Debug: Listing top-level structure ==="
         }
 
         #
-        # 2) Compare HEAD~1..HEAD with Fallback
+        # 2) Compare HEAD~1..HEAD (with fallback if HEAD~1 doesn't exist)
         #
         if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
           $baseCommit = "HEAD~1"
@@ -6541,7 +6541,7 @@ Write-Host "=== Debug: Listing top-level structure ==="
         Write-Host "Comparing commits: $baseCommit..$headCommit"
 
         #
-        # 3) Detect Changes (.pbism, .pbir, .pbix, .json)
+        # 3) Detect Changes in .pbism (model) and .pbir/.pbix/.json (report)
         #
         $modelPatterns  = @('**/*.pbism')
         $reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
@@ -6578,7 +6578,12 @@ Write-Host "=== Debug: Listing top-level structure ==="
         $allItems    = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
 
         #
-        # 5) Helpers: Import Local Model, Find Existing Model
+        # 5) Dictionary for Newly Imported Model IDs if Both Are Committed
+        #
+        $localModelIds = @{}  # e.g. "report 38" => "ID"
+
+        #
+        # Helper to import local .pbism
         #
         function Import-LocalSemanticModel($pbismFile, $wsId) {
           $pbismDir = Split-Path $pbismFile -Parent
@@ -6587,6 +6592,9 @@ Write-Host "=== Debug: Listing top-level structure ==="
           return $imported.id
         }
 
+        #
+        # Helper to find existing model in the workspace
+        #
         function Find-ExistingSMInWorkspace($nameCandidate, $items) {
           $found = $items | Where-Object {
             $_.type -eq "PowerBIModel" -and $_.displayName -eq $nameCandidate
@@ -6595,70 +6603,66 @@ Write-Host "=== Debug: Listing top-level structure ==="
         }
 
         #
-        # 6) Import Any Changed Semantic Models First
+        # 6) Import Changed Models First + Store Their IDs
         #
         if ($modelAddMod.Count -gt 0) {
-          Write-Host "Importing Changed Semantic Models..."
+          Write-Host "Importing changed semantic models..."
           foreach ($mFile in $modelAddMod) {
-            $mDir = Split-Path $mFile -Parent
-            Write-Host "Importing model from $mDir"
-            Import-FabricItem -workspaceId $workspaceID -path $mDir | Out-Null
-            Write-Host "Model imported: $mDir"
+            # Example: if "report 38.SemanticModel/definition.pbism" changed
+            # baseName might be "report 38"
+            $mDir   = Split-Path $mFile -Parent
+            $folder = [System.IO.Path]::GetFileName($mDir)
+            # E.g. folder "report 38.SemanticModel" => base "report 38"
+            $baseName = $folder.Replace(".SemanticModel","")
+
+            Write-Host "Importing model => $mDir"
+            $imp      = Import-FabricItem -workspaceId $workspaceID -path $mDir
+            Write-Host "Model imported => $($imp.displayName) [Id=$($imp.id)]"
+            $localModelIds[$baseName] = $imp.id
           }
-          # Refresh allItems after importing models, so we have updated IDs
+
+          # Refresh workspace items after importing
           $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
         }
 
         #
-        # 7) Handle Model Deletions if needed (optional)
+        # 7) Handle Model Deletions if needed
         #
         if ($modelDel.Count -gt 0) {
-          Write-Host "Handling Deleted Models (optional logic)..."
+          Write-Host "Handling deleted models if required..."
           foreach ($delM in $modelDel) {
             Write-Host "Model file deleted => $delM"
-            # Optionally call Remove-FabricItem if you want to remove from workspace
+            # Optionally remove from the workspace with Remove-FabricItem ...
           }
         }
 
         #
-        # 8) Resolve a Model for Each Changed Report
+        # 8) Resolve Model ID for a changed report
         #
         function Resolve-SemanticModelId($reportFile, $wsId, $allItems) {
           $reportDir  = Split-Path $reportFile -Parent
           $folderName = [System.IO.Path]::GetFileName($reportDir)
 
-          # e.g. "report 38.Report" => "report 38.SemanticModel"
+          # e.g. "report 38.Report" => base "report 38"
+          $baseName   = $folderName.Replace(".Report","")
+          
+          # If we see $baseName in $localModelIds, no searching needed
+          if ($localModelIds.ContainsKey($baseName)) {
+            Write-Host "Found newly imported model ID => $($localModelIds[$baseName]) for $baseName"
+            return $localModelIds[$baseName]
+          }
+
+          # Otherwise fallback: local folder or existing workspace model
           $modelFolder = $folderName.Replace(".Report",".SemanticModel")
           if (Test-Path $modelFolder) {
-            $localModel = Get-ChildItem -Path $modelFolder -Recurse -Include '*.pbism' -File
-            if ($localModel) {
-              # Already imported in Step 6 if changed, so let's find it in workspace
-              # or re-import if we want to ensure the local changes are up to date
-              Write-Host "Local semantic model folder => $modelFolder"
-              # We can do a quick workspace search by name
-              $possibleName = $modelFolder
-              $foundLocal   = Find-ExistingSMInWorkspace $possibleName $allItems
-              if ($foundLocal) {
-                $f = $foundLocal | Select-Object -First 1
-                Write-Host "Found local model in workspace => $($f.displayName) [Id=$($f.id)]"
-                return $f.id
-              }
-              else {
-                # If not found in workspace by that name, re-import directly
-                Write-Host "Re-importing local model => $modelFolder"
-                $smId = Import-LocalSemanticModel $localModel[0].FullName $wsId
-                return $smId
-              }
+            $pbism = Get-ChildItem -Path $modelFolder -Recurse -Include '*.pbism' -File
+            if ($pbism) {
+              Write-Host "Importing local model from $modelFolder..."
+              return Import-LocalSemanticModel $pbism[0].FullName $wsId
             }
           }
 
-          # Fallback: check for existing workspace model
-          $possibleNames = @(
-            $folderName.Replace(".Report",""),
-            $folderName.Replace(".Report",".SemanticModel"),
-            $folderName
-          )
-
+          $possibleNames = @($baseName, $modelFolder, $folderName)
           foreach ($candidate in $possibleNames) {
             $found = Find-ExistingSMInWorkspace $candidate $allItems
             if ($found) {
@@ -6668,30 +6672,31 @@ Write-Host "=== Debug: Listing top-level structure ==="
             }
           }
 
-          throw "Cannot find or import a semantic model for $reportFile. Tried '$modelFolder' + fallback '$($possibleNames -join ', ')'."
+          throw "Cannot find or import a semantic model for $reportFile. Tried base '$baseName' & folder '$modelFolder'."
         }
 
         #
-        # 9) Import Reports, Attaching an SM ID
+        # 9) Import Changed Reports with SM
         #
         if ($reportAddMod.Count -gt 0) {
-          Write-Host "Importing Changed Reports..."
+          Write-Host "Importing changed reports..."
           foreach ($rFile in $reportAddMod) {
             $smId   = Resolve-SemanticModelId $rFile $workspaceID $allItems
             $repDir = Split-Path $rFile -Parent
+
             Import-FabricItem -workspaceId $workspaceID -path $repDir -itemProperties @{ semanticModelId = $smId } | Out-Null
             Write-Host "Report imported => $rFile attached to SM=$smId"
           }
         }
 
         #
-        # 10) Handle Deleted Reports if needed (optional)
+        # 10) Handle Deleted Reports if needed
         #
         if ($reportDel.Count -gt 0) {
-          Write-Host "Handling Deleted Reports (optional logic)..."
+          Write-Host "Handling deleted reports if required..."
           foreach ($delR in $reportDel) {
             Write-Host "Report file deleted => $delR"
-            # Optionally call Remove-FabricItem ...
+            # Optionally remove from workspace with Remove-FabricItem ...
           }
         }
 
