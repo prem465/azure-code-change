@@ -6354,3 +6354,111 @@ Write-Host "=== Debug: Listing top-level structure ==="
         Write-Error ("ERROR: {0}" -f $err)
         throw $err
       }
+-------------------------------------------
+
+# 2) Compare HEAD~1..HEAD with Fallback
+        if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+          $baseCommit = "HEAD~1"
+          $headCommit = "HEAD"
+        } else {
+          $baseCommit = "HEAD"
+          $headCommit = "HEAD"
+        }
+        Write-Host "Comparing commits: $baseCommit..$headCommit"
+
+        # 3) Detect Changed or Deleted Files
+        $reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
+        $modelPatterns  = @('**/*.pbism')
+
+        $reportAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns)
+        $reportDel    = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $reportPatterns)
+        $modelAddMod  = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $modelPatterns)
+        $modelDel     = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $modelPatterns)
+
+        $reportAddMod = $reportAddMod | Sort-Object -Unique
+        $reportDel    = $reportDel    | Sort-Object -Unique
+        $modelAddMod  = $modelAddMod  | Sort-Object -Unique
+        $modelDel     = $modelDel     | Sort-Object -Unique
+
+        Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
+        Write-Host "Reports Deleted: $($reportDel -join ', ')"
+        Write-Host "Models Add/Mod : $($modelAddMod -join ', ')"
+        Write-Host "Models Deleted : $($modelDel -join ', ')"
+
+        $totalChanges = $reportAddMod.Count + $reportDel.Count + $modelAddMod.Count + $modelDel.Count
+        if ($totalChanges -eq 0) {
+          Write-Host "No changes detected. Exiting pipeline."
+          exit 0
+        }
+
+        # 4) Retrieve UAT Workspace
+        $wsObj = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+        if (-not $wsObj) {
+          throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+        }
+
+        $workspaceID = $wsObj.Id
+        $allItems    = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
+        # 5) Helper Functions
+        function Import-LocalSemanticModel($pbismFile, $wsId) {
+          $pbismDir = Split-Path $pbismFile -Parent
+          $imported = Import-FabricItem -workspaceId $wsId -path $pbismDir
+          Write-Host "Semantic model imported => $($imported.displayName) [Id=$($imported.id)]"
+          return $imported.id
+        }
+
+        function Find-ExistingSMInWorkspace($name, $allItems) {
+          $found = $allItems | Where-Object {
+            $_.type -eq "PowerBIModel" -and $_.displayName -eq $name
+          }
+          return $found
+        }
+
+        function Resolve-SemanticModelId($reportFile, $wsId, $allItems) {
+          $reportDir  = Split-Path $reportFile -Parent
+          $folderName = [System.IO.Path]::GetFileName($reportDir)
+
+          $modelFolder = $folderName.Replace(".Report", ".SemanticModel")
+          if (Test-Path $modelFolder) {
+            $pbism = Get-ChildItem -Path $modelFolder -Recurse -Include '*.pbism' -File
+            if ($pbism) {
+              return Import-LocalSemanticModel $pbism[0].FullName $wsId
+            }
+          }
+
+          $possibleNames = @(
+            $folderName.Replace(".Report",""),
+            $folderName.Replace(".Report",".SemanticModel"),
+            $folderName
+          )
+
+          foreach ($nameCandidate in $possibleNames) {
+            $found = Find-ExistingSMInWorkspace $nameCandidate $allItems
+            if ($found) {
+              $f = $found | Select-Object -First 1
+              Write-Host "Found SM => $($f.displayName) [Id=$($f.id)]"
+              return $f.id
+            }
+          }
+
+          throw "Cannot find or import a semantic model for $reportFile. Tried local '$modelFolder' or fallback '$($possibleNames -join ', ')'."
+        }
+
+        # 6) Import Changed Reports with SM
+        if ($reportAddMod.Count -gt 0) {
+          foreach ($rFile in $reportAddMod) {
+            $smId   = Resolve-SemanticModelId $rFile $workspaceID $allItems
+            $repDir = Split-Path $rFile -Parent
+            Import-FabricItem -workspaceId $workspaceID -path $repDir -itemProperties @{ semanticModelId = $smId } | Out-Null
+            Write-Host "Report imported => $rFile attached to SM=$smId"
+          }
+        }
+
+        Write-Host "Promotion to UAT completed successfully."
+      }
+      catch {
+        $err = $_
+        Write-Error ("ERROR: {0}" -f $err)
+        throw $err
+      }
