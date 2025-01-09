@@ -7136,3 +7136,158 @@ Write-Host "=== Debug: Listing top-level structure ==="
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+
+
+----------gpt 4________________________________-
+
+
+- checkout: self
+  fetchDepth: 0
+  displayName: "Checkout (Full Depth)"
+
+- task: PowerShell@2
+  displayName: "Promote to UAT"
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+        #
+        # 1) Import Required Modules & Authenticate
+        #
+        Import-Module Az.Accounts -ErrorAction Stop
+        Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
+        Import-Module FabricPS-PBIP -ErrorAction Stop
+
+        $secret     = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+        $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+        $tenantId   = $env:TENANT_ID.Trim()
+
+        $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+          [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+        )
+
+        $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        $isSPN      = $false
+        if ($credential.UserName -match $guidRegex) {
+          $isSPN = $true
+        }
+
+        if ($isSPN) {
+          Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+            -servicePrincipalSecret $plainTextPwd `
+            -tenantId $tenantId -reset
+        } else {
+          Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+        }
+
+        $authToken = Get-FabricAuthToken
+        if (-not $authToken) {
+          throw "Fabric authentication failed."
+        }
+
+        Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+
+        $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+        $oneLakeUri = [System.Uri]"$($env:UAT_ONELAKE_ENDPOINT)".Trim()
+        $domain     = $oneLakeUri.Host
+        $azLogin    = azcopy login `
+          --service-principal `
+          --application-id $credential.UserName `
+          --tenant-id $tenantId `
+          --trusted-microsoft-suffixes="$domain" `
+          --output-type json | ConvertFrom-Json
+
+        if (-not ($azLogin | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." })) {
+          throw "AzCopy login failed."
+        }
+
+        if ($isSPN) {
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+        } else {
+          Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+        }
+
+        #
+        # 2) Compare HEAD~1..HEAD (Fallback if HEAD~1 doesn't exist)
+        #
+        if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+          $baseCommit = "HEAD~1"
+          $headCommit = "HEAD"
+        } else {
+          $baseCommit = "HEAD"
+          $headCommit = "HEAD"
+        }
+        Write-Host "Comparing commits: $baseCommit..$headCommit"
+
+        #
+        # 3) Detect Changed/Deleted Files
+        #
+        $modelPatterns  = @('**/*.pbism')
+        $reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
+
+        $modelAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $modelPatterns)
+        $modelDel    = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $modelPatterns)
+        $reportAddMod= @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns)
+        $reportDel   = @(git diff --name-only --relative --diff-filter=D  $baseCommit $headCommit -- $reportPatterns)
+
+        $modelAddMod = $modelAddMod | Sort-Object -Unique
+        $modelDel    = $modelDel    | Sort-Object -Unique
+        $reportAddMod= $reportAddMod| Sort-Object -Unique
+        $reportDel   = $reportDel   | Sort-Object -Unique
+
+        Write-Host "Models Add/Mod : $($modelAddMod -join ', ')"
+        Write-Host "Models Deleted : $($modelDel -join ', ')"
+        Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
+        Write-Host "Reports Deleted: $($reportDel -join ', ')"
+
+
+        #
+        # 4) Handle Both Report and Semantic Model Committed Together
+        #
+        if ($modelAddMod.Count -gt 0 -and $reportAddMod.Count -gt 0) {
+          Write-Host "Both Report and Semantic Model committed together. Directly promoting to UAT..."
+          foreach ($model in $modelAddMod) {
+            $modelDir = Split-Path $model -Parent
+            Import-FabricItem -workspaceId $workspaceID -path $modelDir
+            Write-Host "Model promoted: $model"
+          }
+
+          foreach ($report in $reportAddMod) {
+            $reportDir = Split-Path $report -Parent
+            Import-FabricItem -workspaceId $workspaceID -path $reportDir
+            Write-Host "Report promoted: $report"
+          }
+
+          exit 0
+        }
+
+        #
+        # 5) Handle Only Report Committed
+        #
+        function ResolveSemanticModel($reportDir, $workspaceItems) {
+          # Logic to resolve semantic model from local or workspace
+          # ...
+        }
+
+        foreach ($report in $reportAddMod) {
+          $reportDir = Split-Path $report -Parent
+          $smId = ResolveSemanticModel $reportDir $allItems
+          Import-FabricItem -workspaceId $workspaceID -path $reportDir -itemProperties @{ semanticModelId = $smId }
+          Write-Host "Report promoted with Semantic Model: $report"
+        }
+
+        Write-Host "Promotion to UAT completed successfully."
+      }
+      catch {
+        Write-Error "ERROR: $_"
+        throw $_
+      }
+  env:
+    CLIENT_SECRET: $(Clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
