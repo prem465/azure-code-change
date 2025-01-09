@@ -6971,3 +6971,152 @@ Write-Host "=== Debug: Listing top-level structure ==="
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
 
+==================calude-----------------
+
+# ... (keep existing authentication and initialization code until the helper functions)
+
+          ##############################################################################
+          # 6) Helper Functions for Model Resolution and Import
+          ##############################################################################
+          function Import-LocalSemanticModel($pbismFile, $wsId) {
+              $pbismDir = Split-Path $pbismFile -Parent
+              Write-Host "Importing local SM from $pbismDir"
+              
+              try {
+                  $imp = Import-FabricItem -workspaceId $wsId -path $pbismDir -itemProperties @{
+                      displayName = (Split-Path $pbismDir -Leaf)
+                      itemType = "semanticModel"
+                  }
+                  Write-Host "Semantic model imported => $($imp.displayName) [Id=$($imp.id)]"
+                  return $imp.id
+              }
+              catch {
+                  Write-Warning "Failed to import semantic model: $_"
+                  return $null
+              }
+          }
+
+          function Find-ExistingSMInWorkspace($name, $allItems) {
+              # Check for exact match first
+              $found = $allItems | Where-Object {
+                  $_.type -eq "semanticModel" -and $_.displayName -eq $name
+              }
+              
+              if (-not $found) {
+                  # Try partial matches
+                  $found = $allItems | Where-Object {
+                      $_.type -eq "semanticModel" -and 
+                      ($_.displayName -like "*$name*" -or $name -like "*$($_.displayName)*")
+                  }
+              }
+              
+              return $found
+          }
+
+          function Get-SemanticModelFromReport($reportFile) {
+              $reportFolder = Split-Path $reportFile -Parent
+              $pbismFile = Get-ChildItem -Path $reportFolder -Filter "*.pbism" -Recurse | Select-Object -First 1
+              return $pbismFile
+          }
+
+          ##############################################################################
+          # 7) Enhanced Semantic Model Resolution
+          ##############################################################################
+          function Resolve-SemanticModelId($reportFile, $wsId, $allItems) {
+              $reportDir = Split-Path $reportFile -Parent
+              $folderName = [System.IO.Path]::GetFileName($reportDir)
+              Write-Host "Resolving SM ID for => $folderName"
+
+              # Strategy 1: Check if model exists in workspace
+              Write-Host "Strategy 1: Checking existing models in workspace..."
+              $possibleNames = @(
+                  $folderName,
+                  $folderName.Replace(".Report", ""),
+                  $folderName.Replace(".Report", ".SemanticModel")
+              )
+
+              foreach ($name in $possibleNames) {
+                  $existingModel = Find-ExistingSMInWorkspace $name $allItems
+                  if ($existingModel) {
+                      $model = $existingModel | Select-Object -First 1
+                      Write-Host "Found existing model: $($model.displayName) [Id=$($model.id)]"
+                      return $model.id
+                  }
+              }
+
+              # Strategy 2: Look for local semantic model
+              Write-Host "Strategy 2: Looking for local semantic model..."
+              $modelFolder = $folderName.Replace(".Report", ".SemanticModel")
+              $localModel = Get-SemanticModelFromReport $reportFile
+              
+              if ($localModel) {
+                  Write-Host "Found local model: $($localModel.FullName)"
+                  $smId = Import-LocalSemanticModel $localModel.FullName $wsId
+                  if ($smId) {
+                      return $smId
+                  }
+              }
+
+              # Strategy 3: Search in parent directory
+              Write-Host "Strategy 3: Searching in parent directory..."
+              $parentDir = Split-Path $reportDir -Parent
+              $parentModel = Get-ChildItem -Path $parentDir -Filter "*.pbism" -Recurse | Select-Object -First 1
+              
+              if ($parentModel) {
+                  Write-Host "Found model in parent directory: $($parentModel.FullName)"
+                  $smId = Import-LocalSemanticModel $parentModel.FullName $wsId
+                  if ($smId) {
+                      return $smId
+                  }
+              }
+
+              throw "Cannot resolve semantic model for $reportFile. Please ensure the model exists in UAT or commit it with the report."
+          }
+
+          ##############################################################################
+          # 8) Import Changed Reports with Enhanced Validation
+          ##############################################################################
+          if ($reportAddMod.Count -gt 0) {
+              Write-Host "=== Processing Changed Reports ==="
+              foreach ($rFile in $reportAddMod) {
+                  Write-Host "`nHandling changed report => $rFile"
+                  
+                  try {
+                      # Get semantic model ID
+                      $smId = Resolve-SemanticModelId $rFile $workspaceID $allItems
+                      if (-not $smId) {
+                          throw "Could not resolve semantic model ID"
+                      }
+
+                      # Verify semantic model still exists
+                      $modelCheck = Invoke-FabricAPIRequest `
+                          -Uri "workspaces/$workspaceID/semanticmodels/$smId" `
+                          -Method GET `
+                          -ErrorAction SilentlyContinue
+
+                      if (-not $modelCheck) {
+                          throw "Semantic model $smId no longer exists in workspace"
+                      }
+
+                      # Import report
+                      Write-Host "Importing report with semantic model ID: $smId"
+                      $reportDir = Split-Path $rFile -Parent
+                      $result = Import-FabricItem `
+                          -workspaceId $workspaceID `
+                          -path $reportDir `
+                          -itemProperties @{
+                              displayName = (Split-Path $reportDir -Leaf)
+                              itemType = "report"
+                              semanticModelId = $smId
+                          }
+
+                      Write-Host "Successfully imported report: $($result.displayName)"
+                  }
+                  catch {
+                      Write-Error "Failed to process report $rFile`: $_"
+                      throw
+                  }
+              }
+          }
+
+# ... (keep existing error handling and environment variables)
