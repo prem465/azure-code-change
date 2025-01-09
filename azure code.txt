@@ -7325,3 +7325,89 @@ Write-Host "=== Debug: Listing top-level structure ==="
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+-------------deletions--------------------------------------
+
+
+############################################################################
+        # 8) Handle Deletions (Models & Reports)
+        ############################################################################
+        # (A) Model Deletions
+        function Remove-ModelFromWorkspace($deletedFilePath, $allItems) {
+          # e.g. "gatekeeper.SemanticModel/definition.pbism"
+          $parent    = Split-Path $deletedFilePath -Parent   # "gatekeeper.SemanticModel"
+          $base      = [System.IO.Path]::GetFileName($parent).Replace(".SemanticModel","")
+
+          # Find matching item in the workspace => type=PowerBIModel, displayName=$base
+          $existing = $allItems | Where-Object {
+            $_.type -eq "PowerBIModel" -and $_.displayName -eq $base
+          }
+
+          if ($existing) {
+            foreach ($item in $existing) {
+              Write-Host "Removing model '$($item.displayName)' [Id=$($item.id)] from workspace..."
+              Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+              Write-Host "Model removed successfully."
+            }
+          }
+          else {
+            Write-Host "No matching model found in workspace for base='$base'. Skipping removal."
+          }
+        }
+
+        if ($modelDel.Count -gt 0) {
+          Write-Host "=== Handling Model Deletions ==="
+          $deletedModelFolders = @{}
+
+          foreach ($mDel in $modelDel) {
+            $mDelParent = Split-Path $mDel -Parent
+            if (-not $deletedModelFolders.ContainsKey($mDelParent)) {
+              Remove-ModelFromWorkspace $mDel $allItems
+              $deletedModelFolders[$mDelParent] = $true
+            }
+          }
+        }
+
+        # (B) Report Deletions
+        function Remove-ReportFromWorkspace($deletedFilePath, $allItems) {
+          # e.g. "gatekeeper.Report/report.json"
+          $parent = Split-Path $deletedFilePath -Parent   # "gatekeeper.Report"
+          $base   = [System.IO.Path]::GetFileName($parent).Replace(".Report","")
+
+          # Look for a workspace item => type=PowerBIReport, displayName=$base
+          $existing = $allItems | Where-Object {
+            $_.type -eq "PowerBIReport" -and $_.displayName -eq $base
+          }
+
+          if ($existing) {
+            foreach ($item in $existing) {
+              Write-Host "Removing report '$($item.displayName)' [Id=$($item.id)] from workspace..."
+              Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+              Write-Host "Report removed successfully."
+            }
+          }
+          else {
+            Write-Host "No matching report found in workspace for base='$base'. Skipping removal."
+          }
+        }
+
+        if ($reportDel.Count -gt 0) {
+          Write-Host "=== Handling Report Deletions ==="
+          $deletedReportFolders = @{}
+
+          foreach ($rDel in $reportDel) {
+            $rDelParent = Split-Path $rDel -Parent
+            if (-not $deletedReportFolders.ContainsKey($rDelParent)) {
+              Remove-ReportFromWorkspace $rDel $allItems
+              $deletedReportFolders[$rDelParent] = $true
+            }
+          }
+        }
+
+        Write-Host "=== Promotion to UAT completed successfully. ==="
+      }
+      catch {
+        $err = $_
+        Write-Error ("ERROR: {0}" -f $err)
+        throw $err
+      }
