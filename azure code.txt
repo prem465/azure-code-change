@@ -8017,13 +8017,29 @@ Write-Host "=== Done deleting entire folders from UAT ==="
 
 ----------------------------------------------------
 
-Write-Host "`n=== DEBUG: Listing all items in UAT Workspace ==="
+##############################################################################
+# 0) Print all items for debugging
+##############################################################################
+
+Write-Host "=== DEBUG: Listing all items in UAT Workspace ==="
 $allItems | Sort-Object displayName | Format-Table type, displayName, id
 
 ##############################################################################
-# 1) Remove Models (type = "SemanticModel")
+# 1) Helper to delete an item by ID using direct Fabric API call
 ##############################################################################
+function Delete-FabricItemByID {
+    param(
+        [string] $workspaceID,
+        [string] $itemID
+    )
+    $uri = "workspaces/$workspaceID/items/$itemID"
+    Write-Host "Deleting item => ID=$itemID from workspace=$workspaceID via direct API..."
+    Invoke-FabricAPIRequest -Uri $uri -Method DELETE
+}
 
+##############################################################################
+# 2) Remove Model (type = "SemanticModel") with multi-step fallback
+##############################################################################
 function Remove-SemanticModel {
     param(
         [string] $deletedFilePath,   # e.g. "report 106.SemanticModel/definition.pbism"
@@ -8032,19 +8048,18 @@ function Remove-SemanticModel {
     )
 
     Write-Host "`n=== Attempting to delete a SemanticModel for => $deletedFilePath ==="
-
-    $parentFolder = Split-Path $deletedFilePath -Parent   # e.g. "report 106.SemanticModel"
-    $folderName   = Split-Path $parentFolder -Leaf        # e.g. "report 106.SemanticModel"
+    $parentFolder = Split-Path $deletedFilePath -Parent
+    $folderName   = Split-Path $parentFolder -Leaf  # e.g. "report 106.SemanticModel"
 
     Write-Host "Looking for type=SemanticModel with displayName='$folderName'..."
 
-    # STEP A: exact match
+    # Step A: exact
     $foundModel = $allItems | Where-Object {
         $_.type -eq "SemanticModel" -and $_.displayName -eq $folderName
     }
 
     if (!$foundModel) {
-        # STEP B: remove ".SemanticModel" => "report 106"
+        # Step B: remove ".SemanticModel" => "report 106"
         $baseName = $folderName -replace "\.SemanticModel$",""
         Write-Host "No exact match. Trying baseName='$baseName'..."
         $foundModel = $allItems | Where-Object {
@@ -8052,7 +8067,7 @@ function Remove-SemanticModel {
         }
 
         if (!$foundModel) {
-            # STEP C: wildcard => "*report 106*"
+            # Step C: wildcard => "*report 106*"
             $pattern = "*$($baseName)*"
             Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
             $foundModel = $allItems | Where-Object {
@@ -8063,8 +8078,8 @@ function Remove-SemanticModel {
 
     if ($foundModel) {
         foreach ($m in $foundModel) {
-            Write-Host "Removing SemanticModel => $($m.displayName) [Id=$($m.id)]"
-            Remove-FabricItem -workspaceId $workspaceID -itemId $m.id
+            Write-Host "Deleting SemanticModel => $($m.displayName) [Id=$($m.id)]"
+            Delete-FabricItemByID -workspaceID $workspaceID -itemID $m.id
             Write-Host "Model removed successfully."
         }
     }
@@ -8074,9 +8089,8 @@ function Remove-SemanticModel {
 }
 
 ##############################################################################
-# 2) Remove Reports (type = "Report")
+# 3) Remove Report (type = "Report") with multi-step fallback
 ##############################################################################
-
 function Remove-Report {
     param(
         [string] $deletedFilePath,   # e.g. "report 106.Report/definition.pbir"
@@ -8085,19 +8099,18 @@ function Remove-Report {
     )
 
     Write-Host "`n=== Attempting to delete a Report for => $deletedFilePath ==="
-
-    $parentFolder = Split-Path $deletedFilePath -Parent   # e.g. "report 106.Report"
-    $folderName   = Split-Path $parentFolder -Leaf        # e.g. "report 106.Report"
+    $parentFolder = Split-Path $deletedFilePath -Parent
+    $folderName   = Split-Path $parentFolder -Leaf  # e.g. "report 106.Report"
 
     Write-Host "Looking for type=Report with displayName='$folderName'..."
 
-    # STEP A: exact match
+    # Step A: exact
     $foundReport = $allItems | Where-Object {
         $_.type -eq "Report" -and $_.displayName -eq $folderName
     }
 
     if (!$foundReport) {
-        # STEP B: remove ".Report" => "report 106"
+        # Step B: remove ".Report" => "report 106"
         $baseName = $folderName -replace "\.Report$",""
         Write-Host "No exact match. Trying baseName='$baseName'..."
         $foundReport = $allItems | Where-Object {
@@ -8105,7 +8118,7 @@ function Remove-Report {
         }
 
         if (!$foundReport) {
-            # STEP C: wildcard => "*report 106*"
+            # Step C: wildcard => "*report 106*"
             $pattern = "*$($baseName)*"
             Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
             $foundReport = $allItems | Where-Object {
@@ -8116,8 +8129,8 @@ function Remove-Report {
 
     if ($foundReport) {
         foreach ($r in $foundReport) {
-            Write-Host "Removing Report => $($r.displayName) [Id=$($r.id)]"
-            Remove-FabricItem -workspaceId $workspaceID -itemId $r.id
+            Write-Host "Deleting Report => $($r.displayName) [Id=$($r.id)]"
+            Delete-FabricItemByID -workspaceID $workspaceID -itemID $r.id
             Write-Host "Report removed successfully."
         }
     }
@@ -8127,14 +8140,11 @@ function Remove-Report {
 }
 
 ##############################################################################
-# 3) Actually call them for your definition deletions
+# 4) Actually call them for your .pbism / .pbir "definition" deletions
 ##############################################################################
 
 Write-Host "`n=== Handling PBISM & PBIR Deletions ==="
-
-# Suppose you have:
-# $pbismDeletions = @(...) # from git diff of "**/definition.pbism"
-# $pbirDeletions  = @(...) # from git diff of "**/definition.pbir"
+# e.g. $pbismDeletions, $pbirDeletions
 
 if ($pbismDeletions.Count -gt 0) {
     Write-Host "`n=== PBISM Deletions Detected ==="
@@ -8142,7 +8152,7 @@ if ($pbismDeletions.Count -gt 0) {
     foreach ($delM in $pbismDeletions) {
         $modelFolder = Split-Path $delM -Parent
         if (-not $processedModelFolders.ContainsKey($modelFolder)) {
-            Remove-SemanticModel $delM $allItems $workspaceID
+            Remove-SemanticModel -deletedFilePath $delM -allItems $allItems -workspaceID $workspaceID
             $processedModelFolders[$modelFolder] = $true
         }
     }
@@ -8157,7 +8167,7 @@ if ($pbirDeletions.Count -gt 0) {
     foreach ($delR in $pbirDeletions) {
         $reportFolder = Split-Path $delR -Parent
         if (-not $processedReportFolders.ContainsKey($reportFolder)) {
-            Remove-Report $delR $allItems $workspaceID
+            Remove-Report -deletedFilePath $delR -allItems $allItems -workspaceID $workspaceID
             $processedReportFolders[$reportFolder] = $true
         }
     }
