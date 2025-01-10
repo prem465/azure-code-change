@@ -8018,34 +8018,47 @@ Write-Host "=== Done deleting entire folders from UAT ==="
 ----------------------------------------------------
 
 ##############################################################################
-# Model Deletions (two-step fallback)
+# Deletion Logic: "definition.pbir" & "definition.pbism" (Three-Step Fallback)
 ##############################################################################
-function Remove-ModelFromWorkspaceFallback {
+
+#
+# 1) Helper - Remove Model (pbism) from workspace (3-step fallback)
+#
+function Remove-ModelFromWorkspaceThreeStep {
     param(
-        [string] $deletedFilePath,  # e.g. "report 102.SemanticModel/definition.pbism"
-        $allItems,
+        [string] $deletedFilePath,  # e.g. "report 100.SemanticModel/definition.pbism"
+        [System.Object[]] $allItems,
         [string] $workspaceID
     )
 
-    Write-Host "`n=== Handling Deleted PBISM => $deletedFilePath ==="
+    Write-Host "`n=== Deleting Model for => $deletedFilePath ==="
 
-    # 1) The entire model folder (parent folder name)
-    $modelFolder = Split-Path $deletedFilePath -Parent      # e.g. "report 102.SemanticModel"
-    $folderName  = Split-Path $modelFolder -Leaf            # e.g. "report 102.SemanticModel"
+    # Get the immediate parent folder => "report 100.SemanticModel"
+    $parentFolder = Split-Path $deletedFilePath -Parent
+    $folderName   = Split-Path $parentFolder -Leaf
 
-    Write-Host "Trying to remove model => '$folderName' from workspace..."
+    Write-Host "Trying to remove model => '$folderName'"
 
-    # Step A: exact match => "report 102.SemanticModel"
+    # STEP A: Exact match => "report 100.SemanticModel"
     $foundModel = $allItems | Where-Object {
         $_.type -eq "PowerBIModel" -and $_.displayName -eq $folderName
     }
 
     if (!$foundModel) {
-        # Step B: remove ".SemanticModel" => "report 102" (watch for possible extra space or punctuation)
+        # STEP B: Remove ".SemanticModel" => "report 100"
         $baseName = $folderName -replace "\.SemanticModel$",""
         Write-Host "Exact match not found. Trying baseName='$baseName'..."
         $foundModel = $allItems | Where-Object {
             $_.type -eq "PowerBIModel" -and $_.displayName -eq $baseName
+        }
+
+        if (!$foundModel) {
+            # STEP C: Wildcard => "*report 100*"
+            $pattern = "*$($baseName)*"
+            Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
+            $foundModel = $allItems | Where-Object {
+                $_.type -eq "PowerBIModel" -and ($_.displayName -like $pattern)
+            }
         }
     }
 
@@ -8057,40 +8070,49 @@ function Remove-ModelFromWorkspaceFallback {
         }
     }
     else {
-        Write-Host "No matching model found in workspace for '$folderName' or '$baseName'. Skipping."
+        Write-Host "No matching model found in workspace for '$folderName'. Skipping."
     }
 }
 
 
-##############################################################################
-# Report Deletions (two-step fallback)
-##############################################################################
-function Remove-ReportFromWorkspaceFallback {
+#
+# 2) Helper - Remove Report (pbir) from workspace (3-step fallback)
+#
+function Remove-ReportFromWorkspaceThreeStep {
     param(
-        [string] $deletedFilePath,  # e.g. "report 102.Report/definition.pbir"
-        $allItems,
+        [string] $deletedFilePath,  # e.g. "report 100.Report/definition.pbir"
+        [System.Object[]] $allItems,
         [string] $workspaceID
     )
 
-    Write-Host "`n=== Handling Deleted PBIR => $deletedFilePath ==="
+    Write-Host "`n=== Deleting Report for => $deletedFilePath ==="
 
-    # 1) The entire report folder
-    $reportFolder = Split-Path $deletedFilePath -Parent     # e.g. "report 102.Report"
-    $folderName   = Split-Path $reportFolder -Leaf          # e.g. "report 102.Report"
+    # e.g. "report 100.Report"
+    $parentFolder = Split-Path $deletedFilePath -Parent
+    $folderName   = Split-Path $parentFolder -Leaf
 
-    Write-Host "Trying to remove report => '$folderName' from workspace..."
+    Write-Host "Trying to remove report => '$folderName'"
 
-    # Step A: exact match => "report 102.Report"
+    # STEP A: Exact match => "report 100.Report"
     $foundReport = $allItems | Where-Object {
         $_.type -eq "PowerBIReport" -and $_.displayName -eq $folderName
     }
 
     if (!$foundReport) {
-        # Step B: remove ".Report" => "report 102"
+        # STEP B: Remove ".Report" => "report 100"
         $baseName = $folderName -replace "\.Report$",""
         Write-Host "Exact match not found. Trying baseName='$baseName'..."
         $foundReport = $allItems | Where-Object {
             $_.type -eq "PowerBIReport" -and $_.displayName -eq $baseName
+        }
+
+        if (!$foundReport) {
+            # STEP C: Wildcard => "*report 100*"
+            $pattern = "*$($baseName)*"
+            Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
+            $foundReport = $allItems | Where-Object {
+                $_.type -eq "PowerBIReport" -and ($_.displayName -like $pattern)
+            }
         }
     }
 
@@ -8102,27 +8124,29 @@ function Remove-ReportFromWorkspaceFallback {
         }
     }
     else {
-        Write-Host "No matching report found in workspace for '$folderName' or '$baseName'. Skipping."
+        Write-Host "No matching report found in workspace for '$folderName'. Skipping."
     }
 }
 
 
 ##############################################################################
-# Putting It All Together
+# 3) Call them for each definition deletion
 ##############################################################################
 
-# 1) Let’s assume you used “old style” detection for `definition.pbism` and
-#    `definition.pbir` deletions => $pbismDeletions, $pbirDeletions
+Write-Host "`n=== Handling PBISM & PBIR Deletions ==="
+
+# Example: these are the arrays you gather from Git diff:
+# $pbismDeletions = @( ... ) # e.g. "report 100.SemanticModel/definition.pbism"
+# $pbirDeletions  = @( ... ) # e.g. "report 100.Report/definition.pbir"
 
 if ($pbismDeletions.Count -gt 0) {
-    Write-Host "`n=== Deleting Models for removed PBISM files ==="
+    Write-Host "--- PBISM Deletions Detected ---"
     $doneModelFolders = @{}
-
     foreach ($delM in $pbismDeletions) {
-        $parentFolder = Split-Path $delM -Parent
-        if (-not $doneModelFolders.ContainsKey($parentFolder)) {
-            Remove-ModelFromWorkspaceFallback $delM $allItems $workspaceID
-            $doneModelFolders[$parentFolder] = $true
+        $modelFolder = Split-Path $delM -Parent
+        if (-not $doneModelFolders.ContainsKey($modelFolder)) {
+            Remove-ModelFromWorkspaceThreeStep $delM $allItems $workspaceID
+            $doneModelFolders[$modelFolder] = $true
         }
     }
 }
@@ -8131,14 +8155,13 @@ else {
 }
 
 if ($pbirDeletions.Count -gt 0) {
-    Write-Host "`n=== Deleting Reports for removed PBIR files ==="
+    Write-Host "--- PBIR Deletions Detected ---"
     $doneReportFolders = @{}
-
     foreach ($delR in $pbirDeletions) {
-        $parentFolder = Split-Path $delR -Parent
-        if (-not $doneReportFolders.ContainsKey($parentFolder)) {
-            Remove-ReportFromWorkspaceFallback $delR $allItems $workspaceID
-            $doneReportFolders[$parentFolder] = $true
+        $reportFolder = Split-Path $delR -Parent
+        if (-not $doneReportFolders.ContainsKey($reportFolder)) {
+            Remove-ReportFromWorkspaceThreeStep $delR $allItems $workspaceID
+            $doneReportFolders[$reportFolder] = $true
         }
     }
 }
@@ -8146,3 +8169,4 @@ else {
     Write-Host "No PBIR deletions."
 }
 
+Write-Host "`n=== Finished handling deletions ==="
