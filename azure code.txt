@@ -7676,3 +7676,340 @@ else {
 }
 
 Write-Host "=== Done deleting entire folders from UAT ==="
+----------------------------------------timebeing-------------------------
+
+- checkout: self
+  fetchDepth: 0
+  displayName: "Checkout (Full Depth)"
+
+- task: PowerShell@2
+  displayName: "Promote to UAT"
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+        ############################################################################
+        # 1) Modules & Auth
+        ############################################################################
+        Write-Host "=== Step 1: Loading Modules & Authenticating ==="
+        Import-Module Az.Accounts -ErrorAction Stop
+        Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
+        Import-Module FabricPS-PBIP -ErrorAction Stop
+
+        $secret     = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+        $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+        $tenantId   = $env:TENANT_ID.Trim()
+
+        $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+          [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+        )
+
+        $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        $isSPN = $false
+        if ($credential.UserName -match $guidRegex) {
+          $isSPN = $true
+        }
+
+        Write-Host "Authenticating to Fabric..."
+        if ($isSPN) {
+          Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+            -servicePrincipalSecret $plainTextPwd `
+            -tenantId $tenantId -reset
+        }
+        else {
+          Set-FabricAuthToken -credential $credential -tenantId $tenantId -reset
+        }
+
+        $authToken = Get-FabricAuthToken
+        if (-not $authToken) {
+          throw "Fabric authentication failed."
+        }
+
+        Write-Host "Authenticating to Azure..."
+        Connect-AzAccount -ServicePrincipal -Tenant $tenantId -Credential $credential
+
+        Write-Host "Authenticating to OneLake via AzCopy..."
+        $env:AZCOPY_SPA_CLIENT_SECRET = $plainTextPwd
+        $oneLakeUri = [System.Uri]"$($env:UAT_ONELAKE_ENDPOINT)".Trim()
+        $domain     = $oneLakeUri.Host
+        $azLogin    = azcopy login `
+          --service-principal `
+          --application-id $credential.UserName `
+          --tenant-id $tenantId `
+          --trusted-microsoft-suffixes="$domain" `
+          --output-type json | ConvertFrom-Json
+
+        if (-not ($azLogin | Where-Object { $_.MessageContent -eq "INFO: SPN Auth via secret succeeded." })) {
+          throw "AzCopy login failed."
+        }
+
+        Write-Host "Authenticating to Power BI Service..."
+        if ($isSPN) {
+          Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId -ErrorAction Stop
+        }
+        else {
+          Connect-PowerBIServiceAccount -Credential $credential -TenantId $tenantId -ErrorAction Stop
+        }
+
+        ############################################################################
+        # 2) Git Detection for Add/Modify (the new approach)
+        ############################################################################
+        Write-Host "`n=== Step 2: Detecting Added/Modified Files ==="
+        if ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+          $baseCommit = "HEAD~1"
+          $headCommit = "HEAD"
+        }
+        else {
+          $baseCommit = "HEAD"
+          $headCommit = "HEAD"
+        }
+        Write-Host "Comparing commits: $baseCommit..$headCommit"
+
+        # Patterns for normal .pbism, .pbir, etc.
+        $modelPatterns  = @('**/*.pbism')
+        $reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
+
+        $modelAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $modelPatterns) | Sort-Object -Unique
+        $reportAddMod= @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns) | Sort-Object -Unique
+
+        Write-Host "Models Add/Mod : $($modelAddMod -join ', ')"
+        Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
+
+        # If no add/modify, we still might have deletions. So don't exit yet.
+
+        ############################################################################
+        # 2A) Additional detection for Deletions, but ONLY for "definition.pbir" or "definition.pbism"
+        #     This is the "old style" that avoids subfolder confusion.
+        ############################################################################
+        Write-Host "`n=== Also detecting Deletions for 'definition.*' files ==="
+        $pbismDeletions = @(git diff --name-only --relative --diff-filter=D $baseCommit $headCommit '**/definition.pbism') | Sort-Object -Unique
+        $pbirDeletions  = @(git diff --name-only --relative --diff-filter=D $baseCommit $headCommit '**/definition.pbir') | Sort-Object -Unique
+
+        Write-Host "PBISM Deletions => $($pbismDeletions -join ', ')"
+        Write-Host "PBIR Deletions  => $($pbirDeletions -join ', ')"
+
+        $totalChanges = $modelAddMod.Count + $reportAddMod.Count + $pbismDeletions.Count + $pbirDeletions.Count
+        if ($totalChanges -eq 0) {
+          Write-Host "No changes detected (no add/modify or relevant deletions). Exiting pipeline."
+          exit 0
+        }
+
+        ############################################################################
+        # 3) Retrieve the UAT Workspace
+        ############################################################################
+        Write-Host "`n=== Step 3: Retrieving UAT Workspace Items ==="
+        $workspace = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+        if (-not $workspace) {
+          throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+        }
+        $workspaceID = $workspace.Id
+        $allItems    = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
+        ############################################################################
+        # 4) Import Models/Reports (New Both Scenario Logic)
+        ############################################################################
+
+        # Build folder maps
+        function GetFolderMap($filesList, $suffix) {
+          $map = @{}
+          foreach ($f in $filesList) {
+            $pdir = Split-Path $f -Parent
+            $leaf = Split-Path $pdir -Leaf
+            if ($leaf.EndsWith($suffix)) {
+              $base = $leaf.Replace($suffix,"")
+              if (-not $map.ContainsKey($base)) {
+                $map[$base] = $pdir
+              }
+            }
+          }
+          return $map
+        }
+
+        $modelFoldersMap  = GetFolderMap $modelAddMod ".SemanticModel"
+        $reportFoldersMap = GetFolderMap $reportAddMod ".Report"
+
+        # Identify "both" scenario
+        $bothBases = $modelFoldersMap.Keys | Where-Object { $reportFoldersMap.ContainsKey($_) }
+
+        # Dictionary for newly imported model IDs
+        $modelIds = @{}
+
+        # If both are changed
+        if ($bothBases.Count -gt 0) {
+          Write-Host "`n=== Both Model & Report changed in the same commit ==="
+          foreach ($b in $bothBases) {
+            $mFolder = $modelFoldersMap[$b]
+            $rFolder = $reportFoldersMap[$b]
+
+            # Import model first
+            Write-Host "Importing Model => $mFolder (base='$b')"
+            $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+            Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+            $modelIds[$b] = $importedModel.id
+
+            # Then the report
+            Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
+            Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{ semanticModelId = $importedModel.id } | Out-Null
+            Write-Host "Report imported => $rFolder attached to SM=$($importedModel.id)"
+
+            # Remove from map so no fallback
+            $modelFoldersMap.Remove($b) | Out-Null
+            $reportFoldersMap.Remove($b) | Out-Null
+          }
+
+          # Refresh items
+          $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+        }
+
+        # Model-only
+        if ($modelFoldersMap.Count -gt 0) {
+          Write-Host "`n=== Importing Model-Only Changes ==="
+          foreach ($base in $modelFoldersMap.Keys) {
+            $mFolder = $modelFoldersMap[$base]
+            Write-Host "Importing model => $mFolder"
+            $impM = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+            Write-Host "Model imported => $($impM.displayName) [Id=$($impM.id)]"
+            $modelIds[$base] = $impM.id
+          }
+          $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+        }
+
+        # Fallback for report-only
+        function Fallback-ResolveSemanticModel($reportFolder, $allItems) {
+          # same as your existing code
+          $leaf = Split-Path $reportFolder -Leaf
+          $base = $leaf.Replace(".Report","")
+          $modelFold = $leaf.Replace(".Report",".SemanticModel")
+
+          # try local
+          if (Test-Path $modelFold) {
+            $pbism = Get-ChildItem -Path $modelFold -Recurse -Include '*.pbism' -File
+            if ($pbism) {
+              $pbismDir = Split-Path $pbism[0].FullName -Parent
+              $imp = Import-FabricItem -workspaceId $workspaceID -path $pbismDir
+              Write-Host "Semantic model imported => $($imp.displayName) [Id=$($imp.id)]"
+              return $imp.id
+            }
+          }
+
+          # else search workspace
+          $candidates = @($base, $modelFold, $leaf)
+          foreach ($cand in $candidates) {
+            $found = $allItems | Where-Object {
+              $_.type -eq "PowerBIModel" -and $_.displayName -eq $cand
+            }
+            if ($found) {
+              $f = $found | Select-Object -First 1
+              Write-Host "Found existing model => $($f.displayName) [Id=$($f.id)]"
+              return $f.id
+            }
+          }
+
+          throw "Cannot find or import a semantic model for $reportFolder (fallback)."
+        }
+
+        if ($reportFoldersMap.Count -gt 0) {
+          Write-Host "`n=== Importing Report-Only Changes ==="
+          foreach ($base in $reportFoldersMap.Keys) {
+            $rFold = $reportFoldersMap[$base]
+            if ($modelIds.ContainsKey($base)) {
+              $smId = $modelIds[$base]
+              Write-Host "Attaching '$rFold' to modelId=$smId"
+            }
+            else {
+              $smId = Fallback-ResolveSemanticModel $rFold $allItems
+              $modelIds[$base] = $smId
+            }
+
+            Write-Host "Importing report => $rFold"
+            Import-FabricItem -workspaceId $workspaceID -path $rFold -itemProperties @{ semanticModelId = $smId } | Out-Null
+            Write-Host "Report imported => $rFold attached to SM=$smId"
+          }
+        }
+
+        ############################################################################
+        # 5) Deletion: Only react to "definition.pbism" & "definition.pbir" Deletions
+        ############################################################################
+        Write-Host "`n=== Handling Deletions (Old-Style) ==="
+
+        # (A) Models
+        if ($pbismDeletions.Count -gt 0) {
+          Write-Host "--- PBISM Deletions Detected ---"
+          $doneModelFolders = @{}
+          foreach ($delFile in $pbismDeletions) {
+            Write-Host "Deleted definition.pbism => $delFile"
+            # immediate parent is the entire model folder
+            $modelFolder = Split-Path $delFile -Parent
+            $folderName  = Split-Path $modelFolder -Leaf
+            if (-not $doneModelFolders.ContainsKey($modelFolder)) {
+              Write-Host "Removing model => $folderName from workspace..."
+
+              $foundModel = $allItems | Where-Object {
+                $_.type -eq "PowerBIModel" -and $_.displayName -eq $folderName
+              }
+              if ($foundModel) {
+                foreach ($mdl in $foundModel) {
+                  Remove-FabricItem -workspaceId $workspaceID -itemId $mdl.id
+                  Write-Host "Model '$($mdl.displayName)' removed from UAT."
+                }
+              }
+              else {
+                Write-Host "No matching model found for '$folderName'. Skipping."
+              }
+
+              $doneModelFolders[$modelFolder] = $true
+            }
+          }
+        }
+        else {
+          Write-Host "No definition.pbism deletions."
+        }
+
+        # (B) Reports
+        if ($pbirDeletions.Count -gt 0) {
+          Write-Host "--- PBIR Deletions Detected ---"
+          $doneReportFolders = @{}
+          foreach ($delFile in $pbirDeletions) {
+            Write-Host "Deleted definition.pbir => $delFile"
+            $reportFolder = Split-Path $delFile -Parent
+            $folderName   = Split-Path $reportFolder -Leaf
+            if (-not $doneReportFolders.ContainsKey($reportFolder)) {
+              Write-Host "Removing report => $folderName from workspace..."
+
+              $foundReport = $allItems | Where-Object {
+                $_.type -eq "PowerBIReport" -and $_.displayName -eq $folderName
+              }
+              if ($foundReport) {
+                foreach ($rpt in $foundReport) {
+                  Remove-FabricItem -workspaceId $workspaceID -itemId $rpt.id
+                  Write-Host "Report '$($rpt.displayName)' removed from UAT."
+                }
+              }
+              else {
+                Write-Host "No matching report found for '$folderName'. Skipping."
+              }
+
+              $doneReportFolders[$reportFolder] = $true
+            }
+          }
+        }
+        else {
+          Write-Host "No definition.pbir deletions."
+        }
+
+        ############################################################################
+        Write-Host "`n=== Promotion to UAT completed successfully. ==="
+      }
+      catch {
+        $err = $_
+        Write-Error ("ERROR: {0}" -f $err)
+        throw $err
+      }
+  env:
+    CLIENT_SECRET: $(Clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
