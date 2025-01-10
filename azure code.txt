@@ -7520,3 +7520,146 @@ Write-Host "=== Debug: Listing top-level structure ==="
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+----------------------------------------------
+
+
+Write-Host "`n=== Handling Model & Report Deletions ==="
+
+##############################################################################
+# (A) Model Deletions
+##############################################################################
+
+function Remove-ModelFromWorkspaceWildcard {
+    param(
+        [string] $deletedFilePath,
+        [System.Collections.Hashtable] $allItems,
+        [string] $workspaceID
+    )
+
+    # e.g.: "report 106.SemanticModel/definition.pbism"
+    # or "BaseThemes.SemanticModel/model.bim"
+    $parentFolder = Split-Path $deletedFilePath -Parent      # "report 106.SemanticModel"
+    $folderName   = Split-Path $parentFolder -Leaf           # "report 106.SemanticModel"
+
+    # The “base” is everything before “.SemanticModel”
+    $base = $folderName.Replace(".SemanticModel","")
+
+    # We'll do a wildcard match in case the workspace displayName
+    # includes the base or the entire folder name in some form
+    $searchPatterns = @()
+    # Pattern 1: just the base
+    $searchPatterns += "*$($base.ToLower())*"
+    # Pattern 2: the entire folder
+    $searchPatterns += "*$($folderName.ToLower())*"
+
+    # We'll gather any matching items
+    $foundItems = @()
+
+    foreach ($pattern in $searchPatterns) {
+        $result = $allItems | Where-Object {
+            $_.type -eq "PowerBIModel" -and ($_.displayName.ToLower() -like $pattern)
+        }
+        if ($result) {
+            $foundItems += $result
+        }
+    }
+
+    # Remove duplicates (if any) 
+    $foundItems = $foundItems | Sort-Object id -Unique
+
+    if ($foundItems.Count -gt 0) {
+        foreach ($item in $foundItems) {
+            Write-Host "Removing Model '$($item.displayName)' [Id=$($item.id)] from workspace..."
+            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+            Write-Host "Model removed successfully."
+        }
+    }
+    else {
+        Write-Host "No matching model found in workspace for base='$base'. Skipping removal."
+    }
+}
+
+
+if ($modelDel.Count -gt 0) {
+    Write-Host "`n--- Model Deletions Detected ---"
+    $deletedModelFolders = @{}
+    foreach ($mDel in $modelDel) {
+        # We only remove once per folder 
+        $delFolder = Split-Path $mDel -Parent
+        if (-not $deletedModelFolders.ContainsKey($delFolder)) {
+            Remove-ModelFromWorkspaceWildcard -deletedFilePath $mDel -allItems $allItems -workspaceID $workspaceID
+            $deletedModelFolders[$delFolder] = $true
+        }
+    }
+}
+
+
+##############################################################################
+# (B) Report Deletions
+##############################################################################
+
+function Remove-ReportFromWorkspaceWildcard {
+    param(
+        [string] $deletedFilePath,
+        [System.Collections.Hashtable] $allItems,
+        [string] $workspaceID
+    )
+
+    # e.g.: "report 106.Report/definition.pbir"
+    # or "BaseThemes.Report/report.json"
+    $parentFolder = Split-Path $deletedFilePath -Parent      # "report 106.Report"
+    $folderName   = Split-Path $parentFolder -Leaf           # "report 106.Report"
+
+    # The “base” is everything before “.Report”
+    $base = $folderName.Replace(".Report","")
+
+    # We'll do a wildcard match in case the workspace displayName
+    # is something like "report 106" or "report 106.Report" or "BaseThemes.Report"
+    $searchPatterns = @()
+    # Pattern 1: just the base
+    $searchPatterns += "*$($base.ToLower())*"
+    # Pattern 2: the entire folder name
+    $searchPatterns += "*$($folderName.ToLower())*"
+
+    # We'll collect any matching items
+    $foundItems = @()
+
+    foreach ($pattern in $searchPatterns) {
+        $result = $allItems | Where-Object {
+            $_.type -eq "PowerBIReport" -and ($_.displayName.ToLower() -like $pattern)
+        }
+        if ($result) {
+            $foundItems += $result
+        }
+    }
+
+    # Remove duplicates
+    $foundItems = $foundItems | Sort-Object id -Unique
+
+    if ($foundItems.Count -gt 0) {
+        foreach ($item in $foundItems) {
+            Write-Host "Removing Report '$($item.displayName)' [Id=$($item.id)] from workspace..."
+            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+            Write-Host "Report removed successfully."
+        }
+    }
+    else {
+        Write-Host "No matching report found in workspace for base='$base'. Skipping removal."
+    }
+}
+
+
+if ($reportDel.Count -gt 0) {
+    Write-Host "`n--- Report Deletions Detected ---"
+    $deletedReportFolders = @{}
+    foreach ($rDel in $reportDel) {
+        # We only remove once per folder
+        $delFolder = Split-Path $rDel -Parent
+        if (-not $deletedReportFolders.ContainsKey($delFolder)) {
+            Remove-ReportFromWorkspaceWildcard -deletedFilePath $rDel -allItems $allItems -workspaceID $workspaceID
+            $deletedReportFolders[$delFolder] = $true
+        }
+    }
+}
+
