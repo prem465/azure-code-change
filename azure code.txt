@@ -7524,33 +7524,128 @@ Write-Host "=== Debug: Listing top-level structure ==="
 ----------------------------------------------
 
 ##############################################################################
-# 1) Handle Model Deletions (Same Logic, Now Removing)
+# HELPER: Climb Up to a Folder Ending with ".Report"
+##############################################################################
+function Get-ReportFolder {
+    param(
+        [string] $deletedFilePath
+    )
+
+    # Start from the file's parent
+    $folder = Split-Path $deletedFilePath -Parent
+
+    # Climb up until the folder name ends in ".Report" or we run out of folders
+    while ($folder -and -not ((Split-Path $folder -Leaf) -like "*.Report")) {
+        $folder = Split-Path $folder -Parent
+    }
+
+    return $folder
+}
+
+##############################################################################
+# HELPER: Climb Up to a Folder Ending with ".SemanticModel"
+##############################################################################
+function Get-ModelFolder {
+    param(
+        [string] $deletedFilePath
+    )
+
+    $folder = Split-Path $deletedFilePath -Parent
+
+    # Climb up until we find a folder whose leaf ends in ".SemanticModel"
+    while ($folder -and -not ((Split-Path $folder -Leaf) -like "*.SemanticModel")) {
+        $folder = Split-Path $folder -Parent
+    }
+
+    return $folder
+}
+
+##############################################################################
+# HELPER: Remove a Single Report from the Workspace, given "myThing.Report"
+##############################################################################
+function Remove-ReportFolder {
+    param(
+        [string] $reportFolderPath,   # e.g. "model.Report"
+        $allItems,
+        [string] $workspaceID
+    )
+
+    if (-not $reportFolderPath) {
+        Write-Host "Could not find a parent folder ending with '.Report'. Skipping."
+        return
+    }
+
+    $folderName = Split-Path $reportFolderPath -Leaf  # e.g. "model.Report"
+    Write-Host "Attempting to remove report matching displayName='$folderName'..."
+
+    # Look for PowerBIReport with .displayName == "model.Report"
+    $found = $allItems | Where-Object {
+        $_.type -eq "PowerBIReport" -and $_.displayName -eq $folderName
+    }
+
+    if ($found) {
+        foreach ($item in $found) {
+            Write-Host "Removing report => $($item.displayName) [Id=$($item.id)]"
+            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+            Write-Host "Report removed successfully."
+        }
+    }
+    else {
+        Write-Host "No matching report found in workspace for folder='$folderName'. Skipping."
+    }
+}
+
+##############################################################################
+# HELPER: Remove a Single Model from the Workspace, given "model.SemanticModel"
+##############################################################################
+function Remove-ModelFolder {
+    param(
+        [string] $modelFolderPath,
+        $allItems,
+        [string] $workspaceID
+    )
+
+    if (-not $modelFolderPath) {
+        Write-Host "Could not find a parent folder ending with '.SemanticModel'. Skipping."
+        return
+    }
+
+    $folderName = Split-Path $modelFolderPath -Leaf  # e.g. "model.SemanticModel"
+    Write-Host "Attempting to remove model matching displayName='$folderName'..."
+
+    # Look for PowerBIModel with .displayName == "model.SemanticModel"
+    $found = $allItems | Where-Object {
+        $_.type -eq "PowerBIModel" -and $_.displayName -eq $folderName
+    }
+
+    if ($found) {
+        foreach ($item in $found) {
+            Write-Host "Removing model => $($item.displayName) [Id=$($item.id)]"
+            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+            Write-Host "Model removed successfully."
+        }
+    }
+    else {
+        Write-Host "No matching model found in workspace for folder='$folderName'. Skipping."
+    }
+}
+
+##############################################################################
+# 1) Model Deletions
 ##############################################################################
 if ($modelDel.Count -gt 0) {
     Write-Host "`n=== Handling Model Deletions ==="
-    foreach ($delM in $modelDel) {
-        Write-Host "Deleted model => $delM"
+    $doneModelFolders = @{}
+    foreach ($mFile in $modelDel) {
+        Write-Host "Detected model file deletion => $mFile"
 
-        # 1) Derive the base name (e.g. "gatekeeper" from "gatekeeper.SemanticModel")
-        $folder    = Split-Path $delM -Parent
-        $folderName= [System.IO.Path]::GetFileName($folder)
-        $base      = $folderName.Replace(".SemanticModel","")
+        # Climb up to the top folder that ends in ".SemanticModel"
+        $topModelFolder = Get-ModelFolder $mFile
 
-        # 2) Find a matching PowerBIModel in the workspace with .displayName == $base
-        $foundModel = $allItems | Where-Object {
-            $_.type -eq "PowerBIModel" -and $_.displayName -eq $base
-        }
-
-        # 3) If found, remove it from the workspace
-        if ($foundModel) {
-            foreach ($mdlItem in $foundModel) {
-                Write-Host "Removing model => $($mdlItem.displayName) [Id=$($mdlItem.id)]"
-                Remove-FabricItem -workspaceId $workspaceID -itemId $mdlItem.id
-                Write-Host "Model removed successfully."
-            }
-        }
-        else {
-            Write-Host "No matching model found in workspace for base='$base'. Skipping."
+        # Remove only once per folder
+        if ($topModelFolder -and -not $doneModelFolders.ContainsKey($topModelFolder)) {
+            Remove-ModelFolder $topModelFolder $allItems $workspaceID
+            $doneModelFolders[$topModelFolder] = $true
         }
     }
 }
@@ -7558,35 +7653,21 @@ else {
     Write-Host "No model deletions detected."
 }
 
-
 ##############################################################################
-# 2) Handle Report Deletions (Same Logic, Now Removing)
+# 2) Report Deletions
 ##############################################################################
 if ($reportDel.Count -gt 0) {
     Write-Host "`n=== Handling Report Deletions ==="
-    foreach ($delR in $reportDel) {
-        Write-Host "Deleted report => $delR"
+    $doneReportFolders = @{}
+    foreach ($rFile in $reportDel) {
+        Write-Host "Detected report file deletion => $rFile"
 
-        # 1) Derive the base name (e.g. "report 106" from "report 106.Report")
-        $folder    = Split-Path $delR -Parent
-        $folderName= [System.IO.Path]::GetFileName($folder)
-        $base      = $folderName.Replace(".Report","")
+        # Climb up to the top folder that ends in ".Report"
+        $topReportFolder = Get-ReportFolder $rFile
 
-        # 2) Find a matching PowerBIReport in the workspace with .displayName == $base
-        $foundReport = $allItems | Where-Object {
-            $_.type -eq "PowerBIReport" -and $_.displayName -eq $base
-        }
-
-        # 3) If found, remove it from the workspace
-        if ($foundReport) {
-            foreach ($rptItem in $foundReport) {
-                Write-Host "Removing report => $($rptItem.displayName) [Id=$($rptItem.id)]"
-                Remove-FabricItem -workspaceId $workspaceID -itemId $rptItem.id
-                Write-Host "Report removed successfully."
-            }
-        }
-        else {
-            Write-Host "No matching report found in workspace for base='$base'. Skipping."
+        if ($topReportFolder -and -not $doneReportFolders.ContainsKey($topReportFolder)) {
+            Remove-ReportFolder $topReportFolder $allItems $workspaceID
+            $doneReportFolders[$topReportFolder] = $true
         }
     }
 }
