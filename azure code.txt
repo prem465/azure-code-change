@@ -7523,49 +7523,43 @@ Write-Host "=== Debug: Listing top-level structure ==="
 
 ----------------------------------------------
 
-
 Write-Host "`n=== Handling Model & Report Deletions ==="
 
 ##############################################################################
-# (A) Model Deletions
+# (A) Model Deletions (Wildcard Approach)
 ##############################################################################
 
 function Remove-ModelFromWorkspaceWildcard {
     param(
-        [string] $deletedFilePath,
-        [System.Collections.Hashtable] $allItems,
-        [string] $workspaceID
+        $deletedFilePath,
+        $allItems,
+        $workspaceID
     )
 
-    # e.g.: "report 106.SemanticModel/definition.pbism"
-    # or "BaseThemes.SemanticModel/model.bim"
-    $parentFolder = Split-Path $deletedFilePath -Parent      # "report 106.SemanticModel"
-    $folderName   = Split-Path $parentFolder -Leaf           # "report 106.SemanticModel"
+    # Example path: "gatekeeper.SemanticModel/definition.pbism"
+    $parentFolder = Split-Path $deletedFilePath -Parent     # e.g. "gatekeeper.SemanticModel"
+    $folderName   = Split-Path $parentFolder -Leaf          # e.g. "gatekeeper.SemanticModel"
 
-    # The “base” is everything before “.SemanticModel”
+    # Base name is everything before ".SemanticModel"
     $base = $folderName.Replace(".SemanticModel","")
 
-    # We'll do a wildcard match in case the workspace displayName
-    # includes the base or the entire folder name in some form
+    # We do wildcard search in case the workspace item has a name that includes $base
     $searchPatterns = @()
-    # Pattern 1: just the base
     $searchPatterns += "*$($base.ToLower())*"
-    # Pattern 2: the entire folder
     $searchPatterns += "*$($folderName.ToLower())*"
 
-    # We'll gather any matching items
     $foundItems = @()
-
     foreach ($pattern in $searchPatterns) {
-        $result = $allItems | Where-Object {
+        # Compare displayName as lowercase with wildcard
+        $match = $allItems | Where-Object {
             $_.type -eq "PowerBIModel" -and ($_.displayName.ToLower() -like $pattern)
         }
-        if ($result) {
-            $foundItems += $result
+        if ($match) {
+            $foundItems += $match
         }
     }
 
-    # Remove duplicates (if any) 
+    # Remove duplicates if any
     $foundItems = $foundItems | Sort-Object id -Unique
 
     if ($foundItems.Count -gt 0) {
@@ -7580,15 +7574,15 @@ function Remove-ModelFromWorkspaceWildcard {
     }
 }
 
-
 if ($modelDel.Count -gt 0) {
     Write-Host "`n--- Model Deletions Detected ---"
+    # Track folders to avoid removing the same item multiple times if many files are deleted
     $deletedModelFolders = @{}
+
     foreach ($mDel in $modelDel) {
-        # We only remove once per folder 
         $delFolder = Split-Path $mDel -Parent
         if (-not $deletedModelFolders.ContainsKey($delFolder)) {
-            Remove-ModelFromWorkspaceWildcard -deletedFilePath $mDel -allItems $allItems -workspaceID $workspaceID
+            Remove-ModelFromWorkspaceWildcard $mDel $allItems $workspaceID
             $deletedModelFolders[$delFolder] = $true
         }
     }
@@ -7596,45 +7590,40 @@ if ($modelDel.Count -gt 0) {
 
 
 ##############################################################################
-# (B) Report Deletions
+# (B) Report Deletions (Wildcard Approach)
 ##############################################################################
 
 function Remove-ReportFromWorkspaceWildcard {
     param(
-        [string] $deletedFilePath,
-        [System.Collections.Hashtable] $allItems,
-        [string] $workspaceID
+        $deletedFilePath,
+        $allItems,
+        $workspaceID
     )
 
-    # e.g.: "report 106.Report/definition.pbir"
-    # or "BaseThemes.Report/report.json"
-    $parentFolder = Split-Path $deletedFilePath -Parent      # "report 106.Report"
-    $folderName   = Split-Path $parentFolder -Leaf           # "report 106.Report"
+    # Example path: "report 106.Report/definition.pbir"
+    $parentFolder = Split-Path $deletedFilePath -Parent     # e.g. "report 106.Report"
+    $folderName   = Split-Path $parentFolder -Leaf          # e.g. "report 106.Report"
 
-    # The “base” is everything before “.Report”
+    # Base name is everything before ".Report"
     $base = $folderName.Replace(".Report","")
 
-    # We'll do a wildcard match in case the workspace displayName
-    # is something like "report 106" or "report 106.Report" or "BaseThemes.Report"
+    # We do wildcard search so that any displayName containing $base or folderName matches
     $searchPatterns = @()
-    # Pattern 1: just the base
     $searchPatterns += "*$($base.ToLower())*"
-    # Pattern 2: the entire folder name
     $searchPatterns += "*$($folderName.ToLower())*"
 
-    # We'll collect any matching items
     $foundItems = @()
-
     foreach ($pattern in $searchPatterns) {
-        $result = $allItems | Where-Object {
+        # Compare displayName as lowercase with wildcard
+        $match = $allItems | Where-Object {
             $_.type -eq "PowerBIReport" -and ($_.displayName.ToLower() -like $pattern)
         }
-        if ($result) {
-            $foundItems += $result
+        if ($match) {
+            $foundItems += $match
         }
     }
 
-    # Remove duplicates
+    # Remove duplicates if any
     $foundItems = $foundItems | Sort-Object id -Unique
 
     if ($foundItems.Count -gt 0) {
@@ -7649,17 +7638,15 @@ function Remove-ReportFromWorkspaceWildcard {
     }
 }
 
-
 if ($reportDel.Count -gt 0) {
     Write-Host "`n--- Report Deletions Detected ---"
     $deletedReportFolders = @{}
+
     foreach ($rDel in $reportDel) {
-        # We only remove once per folder
         $delFolder = Split-Path $rDel -Parent
         if (-not $deletedReportFolders.ContainsKey($delFolder)) {
-            Remove-ReportFromWorkspaceWildcard -deletedFilePath $rDel -allItems $allItems -workspaceID $workspaceID
+            Remove-ReportFromWorkspaceWildcard $rDel $allItems $workspaceID
             $deletedReportFolders[$delFolder] = $true
         }
     }
 }
-
