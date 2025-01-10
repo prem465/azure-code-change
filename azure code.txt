@@ -8018,135 +8018,149 @@ Write-Host "=== Done deleting entire folders from UAT ==="
 ----------------------------------------------------
 
 Write-Host "=== DEBUG: Listing all items in UAT Workspace ==="
-# Print out type, displayName, and ID so we know exactly what we have
 $allItems | Sort-Object displayName | Format-Table type, displayName, id
 
-##############################################################################
-# THREE-STEP FALLBACK DELETION FOR MODELS
-##############################################################################
 
-function Remove-ModelFromWorkspace {
+##############################################################################
+# Helper - "Fix" name for wildcard (replaces multiple spaces, etc.)
+##############################################################################
+function Make-LenientWildcard($baseName) {
+    # Trim leading/trailing spaces, maybe unify internal spaces
+    $baseName = $baseName.Trim()
+
+    # We'll produce two patterns:
+    #   "*baseName*"  (the normal approach)
+    #   "*$($inverseWords)*" if you want to guess reversed order
+    #
+    # But let's keep it simple: we do "*$baseName*" to be sure
+    # it's case-insensitive (by default in PS).
+    return "*$($baseName)*"
+}
+
+##############################################################################
+# 1) Remove Model (three-step fallback + super-lenient wildcard)
+##############################################################################
+function Remove-ModelFromWorkspaceLenient {
     param(
-        [string] $deletedFilePath,
+        [string] $deletedFilePath,    # e.g. "report 106.SemanticModel/definition.pbism"
         [System.Object[]] $allItems,
         [string] $workspaceID
     )
-    
-    Write-Host "`n=== Attempting to delete a Model for => $deletedFilePath ==="
-    
-    # e.g. "gatekeeper.SemanticModel/definition.pbism"
+
+    Write-Host "`n=== Deleting Model for => $deletedFilePath ==="
+
     $parentFolder = Split-Path $deletedFilePath -Parent
-    $folderName   = Split-Path $parentFolder -Leaf  # e.g. "gatekeeper.SemanticModel"
+    $folderName   = Split-Path $parentFolder -Leaf    # e.g. "report 106.SemanticModel"
 
     Write-Host "Looking for type=PowerBIModel with displayName='$folderName'..."
 
-    # STEP A: Exact folder name
-    $found = $allItems | Where-Object {
+    # STEP A: exact
+    $foundModel = $allItems | Where-Object {
         $_.type -eq "PowerBIModel" -and $_.displayName -eq $folderName
     }
 
-    if (!$found) {
-        # STEP B: remove ".SemanticModel" suffix
+    if (!$foundModel) {
+        # STEP B: remove ".SemanticModel" => "report 106"
         $baseName = $folderName -replace "\.SemanticModel$",""
         Write-Host "No exact match. Trying baseName='$baseName'..."
-        $found = $allItems | Where-Object {
+
+        $foundModel = $allItems | Where-Object {
             $_.type -eq "PowerBIModel" -and $_.displayName -eq $baseName
         }
 
-        if (!$found) {
-            # STEP C: wildcard => "*baseName*"
-            $pattern = "*$($baseName)*"
-            Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
-            $found = $allItems | Where-Object {
+        if (!$foundModel) {
+            # STEP C: super-lenient wildcard
+            $pattern = Make-LenientWildcard $baseName
+            Write-Host "Still not found. Trying super-lenient wildcard='$pattern'..."
+            $foundModel = $allItems | Where-Object {
                 $_.type -eq "PowerBIModel" -and ($_.displayName -like $pattern)
             }
         }
     }
 
-    if ($found) {
-        foreach ($item in $found) {
-            Write-Host "Removing Model => $($item.displayName) [Id=$($item.id)]"
-            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+    if ($foundModel) {
+        foreach ($m in $foundModel) {
+            Write-Host "Removing model => $($m.displayName) [Id=$($m.id)]"
+            Remove-FabricItem -workspaceId $workspaceID -itemId $m.id
             Write-Host "Model removed successfully."
         }
     }
     else {
-        Write-Host "No matching 'PowerBIModel' found for folder '$folderName'. Skipping."
+        Write-Host "No matching 'PowerBIModel' found for '$folderName'. Skipping."
     }
 }
 
 ##############################################################################
-# THREE-STEP FALLBACK DELETION FOR REPORTS
+# 2) Remove Report (three-step fallback + super-lenient wildcard)
 ##############################################################################
-
-function Remove-ReportFromWorkspace {
+function Remove-ReportFromWorkspaceLenient {
     param(
-        [string] $deletedFilePath,
+        [string] $deletedFilePath,    # e.g. "report 106.Report/definition.pbir"
         [System.Object[]] $allItems,
         [string] $workspaceID
     )
 
-    Write-Host "`n=== Attempting to delete a Report for => $deletedFilePath ==="
+    Write-Host "`n=== Deleting Report for => $deletedFilePath ==="
 
-    # e.g. "gatekeeper.Report/definition.pbir"
     $parentFolder = Split-Path $deletedFilePath -Parent
-    $folderName   = Split-Path $parentFolder -Leaf  # e.g. "gatekeeper.Report"
+    $folderName   = Split-Path $parentFolder -Leaf   # e.g. "report 106.Report"
 
     Write-Host "Looking for type=PowerBIReport with displayName='$folderName'..."
 
-    # STEP A: Exact folder name
-    $found = $allItems | Where-Object {
+    # STEP A: exact
+    $foundReport = $allItems | Where-Object {
         $_.type -eq "PowerBIReport" -and $_.displayName -eq $folderName
     }
 
-    if (!$found) {
-        # STEP B: remove ".Report" suffix
+    if (!$foundReport) {
+        # remove ".Report" => "report 106"
         $baseName = $folderName -replace "\.Report$",""
         Write-Host "No exact match. Trying baseName='$baseName'..."
-        $found = $allItems | Where-Object {
+
+        $foundReport = $allItems | Where-Object {
             $_.type -eq "PowerBIReport" -and $_.displayName -eq $baseName
         }
 
-        if (!$found) {
-            # STEP C: wildcard => "*baseName*"
-            $pattern = "*$($baseName)*"
-            Write-Host "Still not found. Trying wildcard pattern='$pattern'..."
-            $found = $allItems | Where-Object {
+        if (!$foundReport) {
+            # super-lenient wildcard
+            $pattern = Make-LenientWildcard $baseName
+            Write-Host "Still not found. Trying super-lenient wildcard='$pattern'..."
+            $foundReport = $allItems | Where-Object {
                 $_.type -eq "PowerBIReport" -and ($_.displayName -like $pattern)
             }
         }
     }
 
-    if ($found) {
-        foreach ($item in $found) {
-            Write-Host "Removing Report => $($item.displayName) [Id=$($item.id)]"
-            Remove-FabricItem -workspaceId $workspaceID -itemId $item.id
+    if ($foundReport) {
+        foreach ($r in $foundReport) {
+            Write-Host "Removing report => $($r.displayName) [Id=$($r.id)]"
+            Remove-FabricItem -workspaceId $workspaceID -itemId $r.id
             Write-Host "Report removed successfully."
         }
     }
     else {
-        Write-Host "No matching 'PowerBIReport' found for folder '$folderName'. Skipping."
+        Write-Host "No matching 'PowerBIReport' found for '$folderName'. Skipping."
     }
 }
 
 ##############################################################################
-# FINALLY, CALL THEM FOR YOUR DEFINITION DELETIONS
+# 3) Call them for your definition deletions
 ##############################################################################
 
 Write-Host "`n=== Handling PBISM & PBIR Deletions ==="
 
 # Suppose you have:
-# $pbismDeletions = @(...) # from git diff
-# $pbirDeletions  = @(...) # from git diff
+#   $pbismDeletions = ...
+#   $pbirDeletions  = ...
 
 if ($pbismDeletions.Count -gt 0) {
     Write-Host "`n=== PBISM Deletions Detected ==="
-    $processedModelFolders = @{}
+    $doneModelFolders = @{}
     foreach ($delM in $pbismDeletions) {
         $modelFolder = Split-Path $delM -Parent
-        if (-not $processedModelFolders.ContainsKey($modelFolder)) {
-            Remove-ModelFromWorkspace $delM $allItems $workspaceID
-            $processedModelFolders[$modelFolder] = $true
+        if (-not $doneModelFolders.ContainsKey($modelFolder)) {
+            Remove-ModelFromWorkspaceLenient $delM $allItems $workspaceID
+            $doneModelFolders[$modelFolder] = $true
         }
     }
 }
@@ -8156,12 +8170,12 @@ else {
 
 if ($pbirDeletions.Count -gt 0) {
     Write-Host "`n=== PBIR Deletions Detected ==="
-    $processedReportFolders = @{}
+    $doneReportFolders = @{}
     foreach ($delR in $pbirDeletions) {
         $reportFolder = Split-Path $delR -Parent
-        if (-not $processedReportFolders.ContainsKey($reportFolder)) {
-            Remove-ReportFromWorkspace $delR $allItems $workspaceID
-            $processedReportFolders[$reportFolder] = $true
+        if (-not $doneReportFolders.ContainsKey($reportFolder)) {
+            Remove-ReportFromWorkspaceLenient $delR $allItems $workspaceID
+            $doneReportFolders[$reportFolder] = $true
         }
     }
 }
