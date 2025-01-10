@@ -7523,29 +7523,33 @@ Write-Host "=== Debug: Listing top-level structure ==="
 
 ----------------------------------------------
 
-################################################################################
-# Model Deletions (Simple Approach)
-################################################################################
+##############################################################################
+# MODEL DELETIONS
+##############################################################################
 if ($modelDel.Count -gt 0) {
     Write-Host "`n=== Handling Model Deletions ==="
-    # We'll keep track of which parent folders we've removed so we don't remove
-    # the same workspace item multiple times if multiple files in the same folder got deleted
     $doneModelFolders = @{}
 
     foreach ($delM in $modelDel) {
         Write-Host "Detected deleted model file => $delM"
 
-        # 1) Get the parent folder — e.g. "myModel.SemanticModel"
-        $delFolder  = Split-Path $delM -Parent
-        $folderName = Split-Path $delFolder -Leaf  # e.g. "myModel.SemanticModel"
+        # 1) Find the immediate parent folder e.g. "report 104.SemanticModel"
+        $delFolder  = Split-Path $delM -Parent       # full path
+        $folderName = Split-Path $delFolder -Leaf    # "report 104.SemanticModel"
 
-        # 2) Only remove once per folder
+        # Only remove once per folder
         if (-not $doneModelFolders.ContainsKey($delFolder)) {
-            Write-Host "Removing workspace item with displayName='$folderName' (PowerBIModel)..."
-
-            # 3) Look in $allItems for a PowerBIModel whose displayName == $folderName
+            # STEP A: Try exact folder name
             $foundModel = $allItems | Where-Object {
                 $_.type -eq "PowerBIModel" -and $_.displayName -eq $folderName
+            }
+
+            if (!$foundModel) {
+                # STEP B: If none found, try removing ".SemanticModel" => e.g. "report 104"
+                $baseName = $folderName.Replace(".SemanticModel","")
+                $foundModel = $allItems | Where-Object {
+                    $_.type -eq "PowerBIModel" -and $_.displayName -eq $baseName
+                }
             }
 
             if ($foundModel) {
@@ -7559,7 +7563,6 @@ if ($modelDel.Count -gt 0) {
                 Write-Host "No matching model found in workspace for folder='$folderName'. Skipping."
             }
 
-            # Mark it as done
             $doneModelFolders[$delFolder] = $true
         }
     }
@@ -7569,9 +7572,9 @@ else {
 }
 
 
-################################################################################
-# Report Deletions (Simple Approach)
-################################################################################
+##############################################################################
+# REPORT DELETIONS
+##############################################################################
 if ($reportDel.Count -gt 0) {
     Write-Host "`n=== Handling Report Deletions ==="
     $doneReportFolders = @{}
@@ -7579,17 +7582,23 @@ if ($reportDel.Count -gt 0) {
     foreach ($delR in $reportDel) {
         Write-Host "Detected deleted report file => $delR"
 
-        # 1) Get the immediate parent folder — e.g. "myReport.Report"
+        # 1) Parent folder e.g. "report 104.Report"
         $delFolder  = Split-Path $delR -Parent
-        $folderName = Split-Path $delFolder -Leaf  # e.g. "myReport.Report"
+        $folderName = Split-Path $delFolder -Leaf    # e.g. "report 104.Report"
 
-        # 2) Only remove once per folder
+        # Only remove once per folder
         if (-not $doneReportFolders.ContainsKey($delFolder)) {
-            Write-Host "Removing workspace item with displayName='$folderName' (PowerBIReport)..."
-
-            # 3) Look in $allItems for a PowerBIReport whose displayName == $folderName
+            # STEP A: Try exact folder name => maybe the workspace item is "report 104.Report"
             $foundReport = $allItems | Where-Object {
                 $_.type -eq "PowerBIReport" -and $_.displayName -eq $folderName
+            }
+
+            if (!$foundReport) {
+                # STEP B: If none found, remove ".Report" => e.g. "report 104"
+                $baseName = $folderName.Replace(".Report","")
+                $foundReport = $allItems | Where-Object {
+                    $_.type -eq "PowerBIReport" -and $_.displayName -eq $baseName
+                }
             }
 
             if ($foundReport) {
@@ -7603,7 +7612,6 @@ if ($reportDel.Count -gt 0) {
                 Write-Host "No matching report found in workspace for folder='$folderName'. Skipping."
             }
 
-            # Mark it as done
             $doneReportFolders[$delFolder] = $true
         }
     }
