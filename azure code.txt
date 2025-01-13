@@ -1,31 +1,4 @@
-
-    targetType: inline
-    script: |
-      [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-      Set-PSRepository -Name "PSGallery" -InstallationPolicy Trusted
-      Install-Module PowerShellGet -Force -AllowClobber -Scope CurrentUser
-
-- task: PowerShell@2
-  displayName: 'Remove AzureRM Module if Loaded and Install Az Module'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      # Remove any AzureRM module that might be loaded in the session
-      Get-Module AzureRM* -ListAvailable | Remove-Module -Force -ErrorAction SilentlyContinue
-
-      # Install Az Module explicitly to avoid conflicts
-      Install-Module -Name Az.Accounts -Force -AllowClobber -Scope CurrentUser
-# Step 2: Install Dependencies Dynamically
-- task: PowerShell@2
-  displayName: 'Install Required Modules'
-  inputs:
-    pwsh: true
-    targetType: inline
-    script: |
-      Write-Host "Installing dependencies dynamically..."
-
-      # Include Az.Accounts module in the list
+z.Accounts module in the list
       $modules = @(
         "Az.Accounts"
         "MicrosoftPowerBIMgmt"
@@ -8177,3 +8150,158 @@ else {
 }
 
 Write-Host "`n=== Done handling deletions ==="
+
+
+-------------------------------------------------------
+
+
+Slide 1: Title Slide
+Title: Automated Deployment Pipeline for Power BI Reports and Semantic Models Subtitle: Streamlining Deployment and Promotion to UAT
+
+Script:
+
+“Good [morning/afternoon], everyone. Today, I’ll walk you through the automated deployment pipeline we’ve developed for promoting Power BI reports and semantic models to the UAT workspace. This pipeline ensures efficiency, consistency, and error-free deployments while meeting all project requirements.”
+Slide 2: Purpose of the Pipeline
+Title: Purpose of the Deployment Pipeline
+
+Content:
+
+Automates deployment of Power BI reports and semantic models to UAT.
+Ensures all files are properly linked and handled.
+Supports both add/modify and delete scenarios seamlessly.
+Provides fallback mechanisms for robustness.
+Script:
+
+“The primary purpose of this pipeline is to automate the deployment and promotion of Power BI assets, such as reports and semantic models, to the UAT workspace. It handles all types of scenarios, including adding, modifying, and deleting files. The pipeline ensures seamless linking between reports and semantic models and includes fallback mechanisms for added robustness.”
+Slide 3: Features of the Pipeline
+Title: Key Features of the Pipeline
+
+Content:
+
+Automated detection of file changes using Git.
+Handles both reports and semantic models in various scenarios:
+Add/Modify: Links reports to appropriate semantic models.
+Delete: Removes files from UAT with a robust multi-step approach.
+Fallback mechanism to locate semantic models for reports.
+Secure authentication with Azure, Power BI, and OneLake.
+Comprehensive error handling and logging.
+Script:
+
+“This pipeline offers several powerful features:
+It automatically detects file changes in Git.
+It supports adding, modifying, and deleting reports and semantic models, ensuring they are properly linked in UAT.
+The fallback mechanism is crucial for handling cases where reports need semantic models but none were committed together.
+We’ve implemented secure authentication with Azure, Power BI, and OneLake.
+Finally, the pipeline includes robust error handling and logging to ensure reliability.”
+Slide 4: Pipeline Workflow Overview
+Title: Pipeline Workflow
+
+Content (Flowchart or Diagram):
+
+Checkout Repository: Pull the latest changes from Git.
+Authentication: Authenticate with Azure, Power BI, and OneLake.
+Detect Changes: Identify added/modified/deleted files in Git.
+Handle Changes:
+Add/Modify: Import files and link appropriately.
+Delete: Remove files using multi-step checks.
+Fallback Mechanism: Locate semantic models for reports when needed.
+Promotion to UAT: Push all updates to the UAT workspace.
+Script:
+
+“Here’s an overview of the pipeline workflow:
+First, we checkout the repository to pull the latest changes.
+Next, authentication happens for Azure, Power BI, and OneLake.
+The pipeline detects changes by comparing the current commit with the previous one.
+Based on the detected changes, it either imports or deletes files.
+When needed, the fallback mechanism ensures reports are linked to valid semantic models.
+Finally, all updates are promoted to the UAT workspace.”
+Slide 5: Key Functions in the Code
+Title: Key Functions in the Pipeline Code
+
+Content:
+
+Import Logic:
+Adds/Modifies reports and semantic models.
+Links reports to semantic models if both are committed.
+Fallback Mechanism:
+Finds a semantic model locally or in UAT when only a report is committed.
+Deletion Logic:
+Multi-step process to remove items from UAT:
+Exact name match.
+Base name match (e.g., removing .Report or .SemanticModel).
+Wildcard match for similar names.
+Script:
+
+“The pipeline uses three key functions:
+The import logic handles adding and modifying files, linking reports to semantic models when both are committed.
+The fallback mechanism is triggered when a report is committed without a semantic model, ensuring it links to an appropriate existing model.
+The deletion logic follows a robust three-step process to safely remove items from UAT by checking exact names, base names, and wildcard patterns.”
+Slide 6: Advantages of the Pipeline
+Title: Advantages of the Deployment Pipeline
+
+Content:
+
+Automation saves time and reduces manual effort.
+Consistency in deployment processes across environments.
+Reliable linking of reports to semantic models.
+Robust handling of errors and edge cases (e.g., fallback mechanism).
+Secure and compliant with Azure, Power BI, and OneLake standards.
+Script:
+
+“This pipeline provides several advantages:
+Automation significantly reduces manual effort and saves time.
+It ensures consistent deployment processes across environments.
+The pipeline reliably links reports to semantic models, avoiding errors.
+It robustly handles edge cases through features like the fallback mechanism.
+Finally, it adheres to security and compliance standards for Azure, Power BI, and OneLake.”
+Slide 7: Challenges and Solutions
+Title: Challenges and Solutions
+
+Content:
+
+Challenge: Handling edge cases like reports without semantic models.
+Solution: Fallback mechanism ensures proper linking.
+Challenge: Secure authentication across multiple services.
+Solution: Implemented robust token-based authentication.
+Challenge: Handling deletions safely.
+Solution: Multi-step deletion logic avoids accidental removals.
+Script:
+
+“We faced a few challenges while developing the pipeline:
+Handling edge cases like reports without semantic models was addressed by the fallback mechanism.
+Secure authentication across Azure, Power BI, and OneLake was achieved using robust token-based authentication.
+Deletion logic required careful implementation to avoid accidental file removal, which we resolved with a multi-step process.”
+Slide 8: Demonstration
+Title: Pipeline Demonstration
+
+Content:
+
+Walk through the pipeline execution step by step:
+Detecting changes in Git.
+Handling add/modify scenarios.
+Triggering fallback for reports.
+Deleting files safely.
+Script:
+
+“Now, let’s see the pipeline in action. I’ll walk you through how it:
+Detects changes in Git.
+Handles adding and modifying reports and semantic models.
+Links reports to semantic models using the fallback mechanism.
+Safely deletes files in UAT using the multi-step logic.”
+Slide 9: Conclusion
+Title: Conclusion
+
+Content:
+
+Summary of the pipeline’s capabilities.
+Benefits for the team and organization.
+Opportunities for future enhancements.
+Script:
+
+“In conclusion, this deployment pipeline streamlines the process of promoting Power BI assets to UAT. It handles all scenarios, ensures consistency, and saves time while adhering to security standards. Moving forward, we can explore enhancements like better logging and support for additional asset types.”
+Slide 10: Questions
+Title: Questions and Feedback
+
+Script:
+
+“Thank you for your time. I’d be happy to answer any questions or hear your feedback on the pipeline.”
