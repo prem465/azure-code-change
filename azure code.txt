@@ -8310,7 +8310,7 @@ Script:
 
 
 
-![Alt Text]("C:\Users\malep\Downloads\diagram.png")
+![Alt Text](C:\Users\malep\Downloads\diagram.png)
 
 
 -----------------------------------------------------------------------
