@@ -8305,3 +8305,15 @@ Title: Questions and Feedback
 Script:
 
 “Thank you for your time. I’d be happy to answer any questions or hear your feedback on the pipeline.”
+
+-----------------------------------------------------
+
+
+
+![Alt Text]("C:\Users\malep\Downloads\diagram.png")
+
+
+-----------------------------------------------------------------------
+
+
+
