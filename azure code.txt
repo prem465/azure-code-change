@@ -8760,3 +8760,46 @@ jobs:
           TENANT_ID: $(tenantid)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
           UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+--------------------------------------------
+
+
+# Initialize a dictionary to store imported model IDs
+$modelIds = @{}
+
+# Process both Report & Model together
+if ($bothBases.Count -gt 0) {
+    Write-Host "=== Importing Both Report & Model in the Same Commit ==="
+    
+    foreach ($b in $bothBases) {
+        $mFolder = $modelFoldersMap[$b]
+        $rFolder = $reportFoldersMap[$b]
+
+        # Step 1: Import the Semantic Model First
+        Write-Host "Importing Model -> $mFolder (Base: $b)"
+        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+        if (-not $importedModel) {
+            throw "Error: Model import failed for $mFolder"
+        }
+        Write-Host "Model imported successfully -> $($importedModel.displayName) [ID=$($importedModel.id)]"
+        
+        # Store the resolved Semantic Model ID
+        $modelIds[$b] = $importedModel.id
+
+        # Step 2: Import the Report & Attach it to the Correct Model ID
+        Write-Host "Importing Report -> $rFolder (Base: $b), Attaching to Model ID=$($importedModel.id)"
+        $importReport = Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{ semanticModelId = $importedModel.id } | Out-Null
+        if (-not $importReport) {
+            throw "Error: Report import failed for $rFolder"
+        }
+        Write-Host "Report imported successfully -> $rFolder attached to Semantic Model ID=$($importedModel.id)"
+    }
+
+    # Remove from map after successful import to avoid fallback issues
+    $modelFoldersMap.Remove($b) | Out-Null
+    $reportFoldersMap.Remove($b) | Out-Null
+}
+
+# Refresh workspace items
+$allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
