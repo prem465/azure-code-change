@@ -8376,6 +8376,11 @@ jobs:
             Get-Module -ListAvailable -Name AzureRM* | Uninstall-Module -Force -AllVersions -ErrorAction SilentlyContinue
             
             Write-Host "Installing required PowerShell modules..."
+            # (Optional) Pin to known versions to avoid future breaking changes:
+            # Install-Module -Name MicrosoftPowerBIMgmt -RequiredVersion 2.0.0 -Scope CurrentUser -AllowClobber -Force
+            # Install-Module -Name FabricPS-PBIP -RequiredVersion 1.1.0 -Scope CurrentUser -AllowClobber -Force
+
+            # Or install the latest:
             if (!(Get-Module -ListAvailable -Name "Az.Accounts")) {
               Install-Module -Name Az.Accounts -Scope CurrentUser -AllowClobber -Force
             }
@@ -8477,6 +8482,10 @@ jobs:
                   throw "Import-FabricItem did not return a model object."
                 }
                 Write-Host "Successfully imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+
+                # -- Optional debug:
+                # Write-Host "Item properties => $($importedModel | ConvertTo-Json -Depth 10)"
+
                 return $importedModel.id
               }
 
@@ -8611,8 +8620,12 @@ jobs:
 
                   # 2) Import report, attach to the new model ID
                   Write-Host "Importing Report => $rFolder (base='$b'), attach to modelId=$importedModelId"
-                  Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{ semanticModelId = $importedModelId } | Out-Null
+                  # *** REMOVED byConnection property => no longer valid ***
+                  $reportItem = Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{ semanticModelId = $importedModelId }
                   Write-Host "Report imported => $rFolder attached to SM=$importedModelId"
+
+                  # -- Optional debug:
+                  # Write-Host "Report item => $($reportItem | ConvertTo-Json -Depth 10)"
 
                   # Remove from maps so we don't process again
                   $modelFoldersMap.Remove($b) | Out-Null
@@ -8650,10 +8663,14 @@ jobs:
                     $smId = Fallback-ResolveSemanticModel -reportPath $rPath -allItems $allItems
                     $modelIds[$base] = $smId
                   }
+
                   Write-Host "Importing report => $rPath, attach to modelId=$smId"
-                  # -- Removed 'byConnection' property; no longer supported --
-                  Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{ semanticModelId = $smId } | Out-Null
+                  # *** REMOVED byConnection property => no longer valid ***
+                  $reportItem = Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{ semanticModelId = $smId }
                   Write-Host "Report imported => $rPath attached to SM=$smId"
+
+                  # Optional debug:
+                  # Write-Host "Report item => $($reportItem | ConvertTo-Json -Depth 10)"
                 }
               }
 
@@ -8796,4 +8813,3 @@ jobs:
           TENANT_ID: $(tenantid)
           UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
           UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
-
