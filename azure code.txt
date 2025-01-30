@@ -9088,29 +9088,28 @@ if ($bothBases.Count -gt 0) {
 ------------
 
 ############################################################################
-# 7) Handle "Both" scenario first (Model+Report in same commit)
+# 9) Import Report-Only Changes 
 ############################################################################
-if ($bothBases.Count -gt 0) {
-    Write-Host "`n=== Both Model & Report changed in the same commit ==="
-    foreach ($b in $bothBases) {
-        $mFolder = $modelFoldersMap[$b]
-        $rFolder = $reportFoldersMap[$b]
+if ($reportFoldersMap.Count -gt 0) {
+    Write-Host "`n=== Importing Report-Only Changes ==="
+    foreach ($base in $reportFoldersMap.Keys) {
+        $rPath = $reportFoldersMap[$base]
+        if ($modelIds.ContainsKey($base)) {
+            $smId = $modelIds[$base]
+            Write-Host "Attaching '$rPath' to modelId=$smId (base='$base')"
+        }
+        else {
+            # Fallback to local or existing
+            $smId = Fallback-ResolveSemanticModel $rPath $allItems
+            $modelIds[$base] = $smId
+        }
 
-        # Import model first (this stays the same)
-        Write-Host "Importing Model => $mFolder (base='$b')"
-        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
-        Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
-        $modelIds[$b] = $importedModel.id
-
-        # Then import report with new connection method
-        Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
-        
         # Update definition file
-        $definitionPath = Join-Path $rFolder "definition.pbir"
+        $definitionPath = Join-Path $rPath "definition.pbir"
         $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
         $definition.datasetReference = @{
             byConnection = @{
-                modelId = $importedModel.id
+                modelId = $smId
                 connectionType = "pbiServiceXmlaStyleLive"
                 pbiModelVirtualServerName = "sobe_wowvirtualserver"
             }
@@ -9119,11 +9118,12 @@ if ($bothBases.Count -gt 0) {
         $definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
 
         # Import with new connection details
-        Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
-            semanticModelId = $importedModel.id
+        Write-Host "Importing report => $rPath with new connection method"
+        Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{
+            semanticModelId = $smId
             datasetReference = @{
                 byConnection = @{
-                    modelId = $importedModel.id
+                    modelId = $smId
                     connectionType = "pbiServiceXmlaStyleLive"
                     pbiModelVirtualServerName = "sobe_wowvirtualserver"
                 }
