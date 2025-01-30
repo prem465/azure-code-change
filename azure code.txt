@@ -8803,3 +8803,201 @@ if ($bothBases.Count -gt 0) {
 # Refresh workspace items
 $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
 
+---------------------------------------------------------------------------------
+
+- task: PowerShell@2
+  displayName: "Promote to UAT"
+  inputs:
+    pwsh: true
+    targetType: inline
+    script: |
+      try {
+        ################################################################################
+        # 1) Load Required Modules & Authenticate
+        ################################################################################
+        Write-Host "Loading modules and authenticating to Fabric, Azure, and Power BI..."
+        Import-Module Az.Accounts -ErrorAction Stop
+        Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
+        Import-Module FabricPS-PBIP -ErrorAction Stop
+
+        $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+        $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
+        $tenantId = $env:TENANT_ID.Trim()
+        $plainTextPwd = [Runtime.InteropServices.Marshal]::PtrToStringAuto(
+          [Runtime.InteropServices.Marshal]::SecureStringToBSTR($credential.Password)
+        )
+        $guidRegex = '[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}'
+        $isSPN = $false
+        if ($credential.UserName -match $guidRegex) { $isSPN = $true }
+
+        # Authentication code remains the same...
+
+        ################################################################################
+        # New Functions for Report Connection Handling
+        ################################################################################
+        function Update-ReportDefinition {
+            param(
+                [string]$ReportPath,
+                [string]$WorkspaceName,
+                [string]$ModelId
+            )
+            
+            $definitionPath = Join-Path $ReportPath "definition.pbir"
+            Write-Host "Updating report definition at: $definitionPath"
+            
+            try {
+                $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
+                
+                $byConnection = @{
+                    connectionString = "Data Source=powerbi://api.powerbi.com/v1.0/myorg/$WorkspaceName;Initial Catalog=$ModelId;Integrated Security=ClaimsToken"
+                    pbiServiceModelId = $null
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                    pbiModelDatabaseName = $ModelId
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    name = "EntityDataSource"
+                }
+                
+                $definition.datasetReference = @{
+                    byPath = $null
+                    byConnection = $byConnection
+                }
+                
+                $definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
+                Write-Host "Successfully updated report definition with byConnection reference"
+                
+                return $true
+            }
+            catch {
+                Write-Error "Failed to update report definition: $_"
+                throw
+            }
+        }
+
+        function Import-ReportWithConnection {
+            param(
+                [string]$WorkspaceId,
+                [string]$ReportPath,
+                [string]$ModelId,
+                [string]$WorkspaceName
+            )
+            
+            Write-Host "Starting report import process..."
+            
+            try {
+                Update-ReportDefinition -ReportPath $ReportPath -WorkspaceName $WorkspaceName -ModelId $ModelId
+                
+                $importResult = Import-FabricItem -workspaceId $WorkspaceId -path $ReportPath
+                
+                if (-not $importResult) {
+                    throw "Report import failed - no result returned"
+                }
+                
+                Write-Host "Report imported successfully. ID: $($importResult.id)"
+                Start-Sleep -Seconds 5
+                
+                $verifyUri = "workspaces/$WorkspaceId/items/$($importResult.id)"
+                $reportDetails = Invoke-FabricAPIRequest -Uri $verifyUri -Method GET
+                
+                if ($reportDetails) {
+                    Write-Host "Report import verified successfully"
+                }
+                
+                return $importResult
+            }
+            catch {
+                Write-Error "Failed during import process: $_"
+                throw
+            }
+        }
+
+        ################################################################################
+        # 2) Detect Changed Files (Add/Modify) & Deletions
+        ################################################################################
+        # Your existing file detection code remains the same...
+
+        ################################################################################
+        # 3) Retrieve UAT Workspace & Items
+        ################################################################################
+        $workspace = Get-FabricWorkspace -workspaceName "$($env:UAT_WORKSPACE_NAME)"
+        if (-not $workspace) {
+            throw "UAT workspace '$($env:UAT_WORKSPACE_NAME)' not found."
+        }
+        $workspaceID = $workspace.Id
+        $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+
+        ################################################################################
+        # 4-6) Handle Model/Report Changes
+        ################################################################################
+        # Your existing model handling code remains the same...
+
+        ############################################################################
+        # 7) Handle "Both" scenario first (Model+Report in same commit)
+        ############################################################################
+        if ($bothBases.Count -gt 0) {
+            Write-Host "`n=== Both Model & Report changed in the same commit ==="
+            foreach ($b in $bothBases) {
+                $mFolder = $modelFoldersMap[$b]
+                $rFolder = $reportFoldersMap[$b]
+
+                # Import model first
+                Write-Host "Importing Model => $mFolder (base='$b')"
+                $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+                Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+                $modelIds[$b] = $importedModel.id
+
+                # Then import the report with new connection method
+                Write-Host "Importing Report => $rFolder (base='$b'), using new connection method"
+                Import-ReportWithConnection -WorkspaceId $workspaceID `
+                                         -ReportPath $rFolder `
+                                         -ModelId $importedModel.id `
+                                         -WorkspaceName $env:UAT_WORKSPACE_NAME
+            }
+        }
+
+        ############################################################################
+        # 8) Import Model-Only Changes
+        ############################################################################
+        # Your existing model-only import code remains the same...
+
+        ############################################################################
+        # 9) Import Report-Only Changes
+        ############################################################################
+        if ($reportFoldersMap.Count -gt 0) {
+            Write-Host "`n=== Importing Report-Only Changes ==="
+            foreach ($base in $reportFoldersMap.Keys) {
+                $rPath = $reportFoldersMap[$base]
+                if ($modelIds.ContainsKey($base)) {
+                    $smId = $modelIds[$base]
+                    Write-Host "Found model ID: $smId for report: $rPath"
+                }
+                else {
+                    $smId = Fallback-ResolveSemanticModel $rPath $allItems
+                    $modelIds[$base] = $smId
+                }
+
+                # Use new connection method for report import
+                Import-ReportWithConnection -WorkspaceId $workspaceID `
+                                         -ReportPath $rPath `
+                                         -ModelId $smId `
+                                         -WorkspaceName $env:UAT_WORKSPACE_NAME
+            }
+        }
+
+        ################################################################################
+        # 5) Handle Deletions
+        ################################################################################
+        # Your existing deletion handling code remains the same...
+
+        Write-Host "`nPromotion to UAT completed successfully."
+      }
+      catch {
+        $err = $_
+        Write-Error ("ERROR: {0}" -f $err)
+        throw $err
+      }
+  env:
+    CLIENT_SECRET: $(Clientsecret)
+    CLIENT_ID: $(clinetid)
+    TENANT_ID: $(tenantid)
+    UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
+    UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
