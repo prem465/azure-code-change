@@ -9001,3 +9001,41 @@ $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method
     TENANT_ID: $(tenantid)
     UAT_WORKSPACE_NAME: $(UAT_WORKSPACE_NAME)
     UAT_ONELAKE_ENDPOINT: $(UAT_ONELAKE_ENDPOINT)
+
+
+-------------------------------------------------
+
+
+# After model is imported successfully and we have $importedModel.id
+Write-Host "Importing Report => $rFolder with model ID: $($importedModel.id)"
+
+# First read and update the report definition
+$definitionPath = Join-Path $rFolder "definition.pbir"
+$definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
+
+# Update the datasetReference section
+$definition.datasetReference = @{
+    byConnection = @{
+        modelId = $importedModel.id
+        connectionType = "pbiServiceXmlaStyleLive"
+        pbiModelVirtualServerName = "sobe_wowvirtualserver"
+    }
+    byPath = $null  # Explicitly remove byPath
+}
+
+# Save the updated definition
+$definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
+
+# Now import with explicit semanticModelId
+Import-FabricItem -workspaceId $workspaceID `
+                 -path $rFolder `
+                 -itemProperties @{
+                     semanticModelId = $importedModel.id
+                     datasetReference = @{
+                         byConnection = @{
+                             modelId = $importedModel.id
+                             connectionType = "pbiServiceXmlaStyleLive"
+                             pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                         }
+                     }
+                 }
