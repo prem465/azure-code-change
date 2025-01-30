@@ -9039,3 +9039,95 @@ Import-FabricItem -workspaceId $workspaceID `
                          }
                      }
                  }
+-----------------------------------------------------
+
+############################################################################
+# 7) Handle "Both" scenario first (Model+Report in same commit)
+############################################################################
+if ($bothBases.Count -gt 0) {
+    Write-Host "`n=== Both Model & Report changed in the same commit ==="
+    foreach ($b in $bothBases) {
+        $mFolder = $modelFoldersMap[$b]
+        $rFolder = $reportFoldersMap[$b]
+
+        # Import model first (this stays the same)
+        Write-Host "Importing Model => $mFolder (base='$b')"
+        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+        Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+        $modelIds[$b] = $importedModel.id
+
+        # Then import report with new connection method
+        Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
+        
+        # Update definition file
+        $definitionPath = Join-Path $rFolder "definition.pbir"
+        $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
+        $definition.datasetReference = @{
+            byConnection = @{
+                modelId = $importedModel.id
+                connectionType = "pbiServiceXmlaStyleLive"
+                pbiModelVirtualServerName = "sobe_wowvirtualserver"
+            }
+            byPath = $null
+        }
+        $definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
+
+        # Import with new connection details
+        Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
+            semanticModelId = $importedModel.id
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $importedModel.id
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        } | Out-Null
+    }
+}
+------------
+
+############################################################################
+# 7) Handle "Both" scenario first (Model+Report in same commit)
+############################################################################
+if ($bothBases.Count -gt 0) {
+    Write-Host "`n=== Both Model & Report changed in the same commit ==="
+    foreach ($b in $bothBases) {
+        $mFolder = $modelFoldersMap[$b]
+        $rFolder = $reportFoldersMap[$b]
+
+        # Import model first (this stays the same)
+        Write-Host "Importing Model => $mFolder (base='$b')"
+        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+        Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+        $modelIds[$b] = $importedModel.id
+
+        # Then import report with new connection method
+        Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
+        
+        # Update definition file
+        $definitionPath = Join-Path $rFolder "definition.pbir"
+        $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
+        $definition.datasetReference = @{
+            byConnection = @{
+                modelId = $importedModel.id
+                connectionType = "pbiServiceXmlaStyleLive"
+                pbiModelVirtualServerName = "sobe_wowvirtualserver"
+            }
+            byPath = $null
+        }
+        $definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
+
+        # Import with new connection details
+        Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
+            semanticModelId = $importedModel.id
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $importedModel.id
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        } | Out-Null
+    }
+}
