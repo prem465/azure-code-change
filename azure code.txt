@@ -9241,13 +9241,17 @@ if ($reportFoldersMap.Count -gt 0) {
 -----------------------------
 
 
-############################################################################
-# 7) Handle "Both" scenario first (Model+Report in same commit)
-############################################################################
+# Identify "both" scenario
+$bothBases = $modelFoldersMap.Keys | Where-Object { $reportFoldersMap.ContainsKey($_) }
+
+# Dictionary for newly imported model IDs
+$modelIds = @{}
+
+# If both are changed
 if ($bothBases.Count -gt 0) {
     Write-Host "`n=== Both Model & Report changed in the same commit ==="
     foreach ($b in $bothBases) {
-        try {  # Make sure to add proper try block
+        try {  # Added try block here
             $mFolder = $modelFoldersMap[$b]
             $rFolder = $reportFoldersMap[$b]
 
@@ -9257,75 +9261,49 @@ if ($bothBases.Count -gt 0) {
             Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
             $modelIds[$b] = $importedModel.id
 
-            # Add refresh steps
-            if ($importedModel) {
-                Write-Host "Triggering semantic model refresh..."
-                try {
-                    $refreshUri = "workspaces/$workspaceID/items/$($importedModel.id)/refresh"
-                    Invoke-FabricAPIRequest -Uri $refreshUri -Method POST
-                    
-                    # Wait for refresh
-                    $maxWaitTime = 300
-                    $startTime = Get-Date
-                    $refreshComplete = $false
-                    
-                    while (-not $refreshComplete -and ((Get-Date) - $startTime).TotalSeconds -lt $maxWaitTime) {
-                        Start-Sleep -Seconds 10
-                        $statusUri = "workspaces/$workspaceID/items/$($importedModel.id)/refreshes"
-                        $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
-                        
-                        if ($refreshStatus.status -eq "Completed") {
-                            $refreshComplete = $true
-                            Write-Host "Refresh completed successfully"
-                            break
-                        }
-                    }
+            # After model is imported successfully and we have $importedModel.id
+            Write-Host "Importing Report => $rFolder with model ID: $($importedModel.id)"
+
+            # First read and update the report definition
+            $definitionPath = Join-Path $rFolder "definition.pbir"
+            $definition = Get-Content $definitionPath -Raw | ConvertFrom-Json
+
+            # Update the datasetReference section
+            $definition.datasetReference = @{
+                byConnection = @{
+                    modelId = $importedModel.id
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
                 }
-                catch {
-                    Write-Warning "Model refresh encountered an issue: $_"
-                }
+                byPath = $null  # Explicitly remove byPath
             }
 
-            # Import report with verification
-            Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
-            $importedReport = Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
-                semanticModelId = $importedModel.id
-                datasetReference = @{
-                    byConnection = @{
-                        modelId = $importedModel.id
-                        connectionType = "pbiServiceXmlaStyleLive"
-                        pbiModelVirtualServerName = "sobe_wowvirtualserver"
-                    }
-                }
-            }
+            # Save the updated definition
+            $definition | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
 
-            # Verify report
-            if ($importedReport) {
-                Write-Host "Verifying report data access..."
-                try {
-                    $reportUri = "workspaces/$workspaceID/items/$($importedReport.id)"
-                    $reportStatus = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
-                    
-                    if ($reportStatus) {
-                        Write-Host "Report status: $($reportStatus.status)"
-                        
-                        # Trigger report refresh
-                        $reportRefreshUri = "$reportUri/refresh"
-                        Invoke-FabricAPIRequest -Uri $reportRefreshUri -Method POST
-                        Write-Host "Triggered report refresh"
-                        
-                        Start-Sleep -Seconds 5
-                        $finalCheck = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
-                        Write-Host "Final report state: $($finalCheck.status)"
-                    }
-                }
-                catch {
-                    Write-Warning "Report verification failed: $_"
-                }
-            }
+            # Now import with explicit semanticModelId
+            Import-FabricItem -workspaceId $workspaceID `
+                            -path $rFolder `
+                            -itemProperties @{
+                                semanticModelId = $importedModel.id
+                                datasetReference = @{
+                                    byConnection = @{
+                                        modelId = $importedModel.id
+                                        connectionType = "pbiServiceXmlaStyleLive"
+                                        pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                                    }
+                                }
+                            }
+
+            # Remove from map so no fallback
+            $modelFoldersMap.Remove($b) | Out-Null
+            $reportFoldersMap.Remove($b) | Out-Null
+
+            # Refresh items
+            $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
         }
         catch {
-            Write-Error "Error in deployment process: $_"
+            Write-Error "Error in both model and report deployment: $_"
             throw
         }
     }
