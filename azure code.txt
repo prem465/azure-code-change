@@ -9127,6 +9127,113 @@ if ($reportFoldersMap.Count -gt 0) {
                     connectionType = "pbiServiceXmlaStyleLive"
                     pbiModelVirtualServerName = "sobe_wowvirtualserver"
                 }
+------------------------------------------------------
+
+
+############################################################################
+# 7) Handle "Both" scenario first (Model+Report in same commit)
+############################################################################
+if ($bothBases.Count -gt 0) {
+    Write-Host "`n=== Both Model & Report changed in the same commit ==="
+    foreach ($b in $bothBases) {
+        # ... existing model import code ...
+
+        # Then import report
+        Write-Host "Importing Report => $rFolder (base='$b'), attaching to modelId=$($importedModel.id)"
+        $importedReport = Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
+            semanticModelId = $importedModel.id
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $importedModel.id
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        }
+
+        # Add verification step right here after report import
+        if ($importedReport) {
+            Write-Host "Verifying report data access..."
+            try {
+                # Check report status
+                $reportUri = "workspaces/$workspaceID/items/$($importedReport.id)"
+                $reportStatus = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
+                
+                if ($reportStatus) {
+                    Write-Host "Report status: $($reportStatus.status)"
+                    
+                    # Trigger report refresh to ensure data is accessible
+                    $reportRefreshUri = "$reportUri/refresh"
+                    Invoke-FabricAPIRequest -Uri $reportRefreshUri -Method POST
+                    Write-Host "Triggered report refresh"
+                    
+                    # Wait briefly and verify data access
+                    Start-Sleep -Seconds 5
+                    $finalCheck = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
+                    Write-Host "Final report state: $($finalCheck.status)"
+                }
+            }
+            catch {
+                Write-Warning "Report verification failed: $_"
+                Write-Host "You may need to manually refresh the report in UAT"
+            }
+        }
+    }
+}
+
+------------------
+
+############################################################################
+# 9) Import Report-Only Changes
+############################################################################
+if ($reportFoldersMap.Count -gt 0) {
+    Write-Host "`n=== Importing Report-Only Changes ==="
+    foreach ($base in $reportFoldersMap.Keys) {
+        $rPath = $reportFoldersMap[$base]
+        # ... existing model ID resolution code ...
+
+        # Import report
+        Write-Host "Importing report => $rPath"
+        $importedReport = Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{
+            semanticModelId = $smId
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $smId
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        }
+
+        # Add the same verification step here
+        if ($importedReport) {
+            Write-Host "Verifying report data access..."
+            try {
+                # Check report status
+                $reportUri = "workspaces/$workspaceID/items/$($importedReport.id)"
+                $reportStatus = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
+                
+                if ($reportStatus) {
+                    Write-Host "Report status: $($reportStatus.status)"
+                    
+                    # Trigger report refresh to ensure data is accessible
+                    $reportRefreshUri = "$reportUri/refresh"
+                    Invoke-FabricAPIRequest -Uri $reportRefreshUri -Method POST
+                    Write-Host "Triggered report refresh"
+                    
+                    # Wait briefly and verify data access
+                    Start-Sleep -Seconds 5
+                    $finalCheck = Invoke-FabricAPIRequest -Uri $reportUri -Method GET
+                    Write-Host "Final report state: $($finalCheck.status)"
+                }
+            }
+            catch {
+                Write-Warning "Report verification failed: $_"
+                Write-Host "You may need to manually refresh the report in UAT"
+            }
+        }
+    }
+}
             }
         } | Out-Null
     }
