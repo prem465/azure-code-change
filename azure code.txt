@@ -9315,11 +9315,9 @@ if ($bothBases.Count -gt 0) {
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        # Make sure PowerBI module is imported
-        Import-Module MicrosoftPowerBIMgmt -Force
-        
         # Connect to Power BI if not already connected
         if ($isSPN) {
+            Write-Host "Connecting to Power BI as Service Principal..."
             Connect-PowerBIServiceAccount -ServicePrincipal `
                 -Credential $credential `
                 -TenantId $tenantId
@@ -9327,24 +9325,53 @@ if ($importedModel) {
 
         Write-Host "Starting semantic model refresh for ID: $($importedModel.id)"
         
-        # Use simpler refresh call with existing credential
+        # Use proper LogOutput value from the reference code
         Invoke-SemanticModelRefresh `
             -WorkspaceId $workspaceID `
             -SemanticModelId $importedModel.id `
             -Credential $credential `
             -TenantId $tenantId `
             -Environment Public `
-            -LogOutput "Console"  # Changed to Console for better visibility
+            -LogOutput "ADO"  # Changed to "ADO" as per the warning message
         
         Write-Host "Semantic model refresh triggered successfully"
         
-        # Wait briefly to let refresh initialize
-        Start-Sleep -Seconds 10
+        # Add status check after refresh
+        $attempts = 0
+        $maxAttempts = 6
+        $refreshComplete = $false
         
-        Write-Host "Model initialization completed"
+        while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
+            Start-Sleep -Seconds 10
+            $attempts++
+            
+            try {
+                $statusUri = "workspaces/$workspaceID/items/$($importedModel.id)/refreshes"
+                $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
+                
+                if ($refreshStatus.status -eq "Completed") {
+                    $refreshComplete = $true
+                    Write-Host "Model refresh completed successfully"
+                    break
+                }
+                elseif ($refreshStatus.status -eq "Failed") {
+                    Write-Warning "Model refresh failed: $($refreshStatus.errorMessage)"
+                    break
+                }
+                
+                Write-Host "Checking refresh status... Attempt $attempts of $maxAttempts"
+            }
+            catch {
+                Write-Warning "Error checking refresh status: $_"
+            }
+        }
+
+        if (-not $refreshComplete) {
+            Write-Warning "Model refresh status check timed out"
+        }
     }
     catch {
         Write-Warning "Semantic model refresh warning: $_"
-        # Don't throw error to allow pipeline to continue
+        Write-Warning "Continuing with deployment despite refresh warning"
     }
 }
