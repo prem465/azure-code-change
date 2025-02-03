@@ -9311,38 +9311,26 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
-# After both model and report are imported to UAT
+# Add this right after successful model import, before any other operations
 if ($importedModel) {
-    Write-Host "Verifying UAT deployment..."
+    Write-Host "Initializing semantic model in UAT..."
     try {
-        # 1. Verify model deployment
-        $modelUri = "workspaces/$workspaceID/items/$($importedModel.id)"
-        $modelDetails = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
-        Write-Host "Model status in UAT: $($modelDetails.configurationStatus)"
-
-        # 2. Check if data refresh is needed
-        Write-Host "Attempting data refresh..."
+        # Simple refresh trigger
         $refreshUri = "workspaces/$workspaceID/items/$($importedModel.id)/refresh"
         Invoke-FabricAPIRequest -Uri $refreshUri -Method POST
+        Write-Host "Refresh triggered for semantic model"
         
-        # 3. Wait for refresh to complete
-        Start-Sleep -Seconds 30  # Give time for refresh to start
+        # Give it some time to process
+        Write-Host "Waiting for refresh to initialize..."
+        Start-Sleep -Seconds 30
         
+        # Check refresh status
         $statusUri = "workspaces/$workspaceID/items/$($importedModel.id)/refreshes"
         $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
-        Write-Host "Refresh status: $($refreshStatus.status)"
-
-        # 4. Log important details for Power BI team
-        Write-Host "=== Deployment Details for Power BI Team ==="
-        Write-Host "Model ID: $($importedModel.id)"
-        Write-Host "Workspace: $($env:UAT_WORKSPACE_NAME)"
-        Write-Host "Note: If error persists, Power BI team should:"
-        Write-Host "1. Check data source credentials in UAT"
-        Write-Host "2. Verify semantic model configuration"
-        Write-Host "3. Try manual refresh in UAT workspace"
+        Write-Host "Initial refresh status: $($refreshStatus.status)"
     }
     catch {
-        Write-Warning "Post-deployment verification encountered issues: $_"
-        Write-Warning "Please have Power BI team check UAT workspace configuration"
+        Write-Warning "Initial data refresh attempt encountered an issue - manual refresh may be needed"
+        Write-Warning "Error details: $_"
     }
 }
