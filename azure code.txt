@@ -9311,22 +9311,40 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
-# Add this right after your model import in the "Both" scenario
+# Add this after model import (in both scenarios)
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        # Use Invoke-SemanticModelRefresh to properly initialize the model
-        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID `
+        # Make sure PowerBI module is imported
+        Import-Module MicrosoftPowerBIMgmt -Force
+        
+        # Connect to Power BI if not already connected
+        if ($isSPN) {
+            Connect-PowerBIServiceAccount -ServicePrincipal `
+                -Credential $credential `
+                -TenantId $tenantId
+        }
+
+        Write-Host "Starting semantic model refresh for ID: $($importedModel.id)"
+        
+        # Use simpler refresh call with existing credential
+        Invoke-SemanticModelRefresh `
+            -WorkspaceId $workspaceID `
             -SemanticModelId $importedModel.id `
             -Credential $credential `
             -TenantId $tenantId `
             -Environment Public `
-            -LogOutput "ADO"
+            -LogOutput "Console"  # Changed to Console for better visibility
         
-        Write-Host "Semantic model refresh completed successfully"
+        Write-Host "Semantic model refresh triggered successfully"
+        
+        # Wait briefly to let refresh initialize
+        Start-Sleep -Seconds 10
+        
+        Write-Host "Model initialization completed"
     }
     catch {
-        Write-Warning "Semantic model refresh encountered an issue: $_"
-        Write-Warning "This might affect report data visibility"
+        Write-Warning "Semantic model refresh warning: $_"
+        # Don't throw error to allow pipeline to continue
     }
 }
