@@ -9311,50 +9311,49 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
-# Add this after your model import
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        # Ensure we're connected to Power BI
-        if ($isSPN) {
-            Write-Host "Ensuring Power BI connection..."
-            Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-        }
-
-        # Get refresh endpoint from model ID
         $modelId = $importedModel.id
-        Write-Host "Starting semantic model refresh for ID: $modelId"
+        Write-Host "Model imported with ID: $modelId"
+
+        # Important: Wait for model registration
+        Write-Host "Waiting for model to be registered..."
+        Start-Sleep -Seconds 15  # Give time for model to be fully registered
+
+        # Use the exact Power BI API endpoint format
+        $refreshUri = "groups/$workspaceID/datasets/$modelId/refreshes"
+        Write-Host "Attempting refresh using URI: $refreshUri"
 
         try {
-            # Simple API-based refresh approach
-            $refreshUri = "workspaces/$workspaceID/items/$modelId/refresh"
-            Invoke-FabricAPIRequest -Uri $refreshUri -Method POST
-            
-            # Wait briefly for refresh to start
-            Start-Sleep -Seconds 5
-            
-            # Check refresh status
-            $statusUri = "workspaces/$workspaceID/items/$modelId/refreshes"
-            $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
-            
-            if ($refreshStatus) {
-                Write-Host "Refresh triggered successfully, checking status..."
-            }
-            else {
-                Write-Warning "Could not verify refresh status"
+            # First connect to Power BI
+            if ($isSPN) {
+                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
             }
 
-            # If you need the report to be able to proceed even if refresh fails
-            Write-Host "Continuing with deployment process..."
+            # Use Power BI REST API for refresh
+            $refreshParams = @{
+                method = 'POST'
+                url = $refreshUri
+                errorAction = 'Stop'
+            }
+            
+            Invoke-PowerBIRestMethod @refreshParams
+            Write-Host "Refresh request submitted successfully"
+
+            # Check refresh status
+            Write-Host "Checking refresh status..."
+            $statusUri = "$refreshUri"
+            $status = Invoke-PowerBIRestMethod -url $statusUri -method GET
+            Write-Host "Refresh status: $status"
         }
         catch {
             Write-Warning "Refresh attempt encountered an issue: $_"
             Write-Warning "Continuing with deployment despite refresh warning"
-            # Don't throw error to allow pipeline to continue
         }
     }
     catch {
         Write-Warning "Model initialization warning: $_"
-        # Continue pipeline even if refresh fails
+        Write-Warning "Continuing with deployment"
     }
 }
