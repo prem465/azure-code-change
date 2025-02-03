@@ -9316,40 +9316,61 @@ if ($importedModel) {
     try {
         $modelId = $importedModel.id
         Write-Host "Model imported with ID: $modelId"
-
-        # Important: Wait for model registration
+        
+        # Wait for model registration
         Write-Host "Waiting for model to be registered..."
-        Start-Sleep -Seconds 15  # Give time for model to be fully registered
-
-        # Use the exact Power BI API endpoint format
-        $refreshUri = "groups/$workspaceID/datasets/$modelId/refreshes"
-        Write-Host "Attempting refresh using URI: $refreshUri"
+        Start-Sleep -Seconds 15
 
         try {
-            # First connect to Power BI
+            # First ensure Power BI connection
             if ($isSPN) {
                 Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
             }
 
-            # Use Power BI REST API for refresh
-            $refreshParams = @{
-                method = 'POST'
-                url = $refreshUri
-                errorAction = 'Stop'
+            # Get the datasources to set credentials
+            Write-Host "Getting datasource information..."
+            $datasourcesUri = "groups/$workspaceID/datasets/$modelId/datasources"
+            $datasources = Invoke-PowerBIRestMethod -Url $datasourcesUri -Method GET | ConvertFrom-Json
+
+            foreach ($datasource in $datasources.value) {
+                Write-Host "Setting credentials for datasource: $($datasource.datasourceId)"
+                
+                # Prepare credential body based on gateway datasource
+                $credBody = @{
+                    credentialDetails = @{
+                        credentials = "{`"credentialData`":[{`"name`":`"username`",`"value`":`"$($env:CLIENT_ID)`"},{`"name`":`"password`",`"value`":`"$($env:CLIENT_SECRET)`"}]}"
+                        credentialType = "Basic"
+                        useEndUserOAuth2Credentials = "False"
+                        privacyLevel = "Organizational"
+                    }
+                } | ConvertTo-Json -Depth 10
+
+                # Set credentials
+                $credentialsUri = "groups/$workspaceID/datasets/$modelId/Default.SetAllConnections"
+                Invoke-PowerBIRestMethod -Url $credentialsUri -Method POST -Body $credBody
+                Write-Host "Credentials set successfully"
             }
-            
-            Invoke-PowerBIRestMethod @refreshParams
-            Write-Host "Refresh request submitted successfully"
+
+            # Now trigger refresh
+            Write-Host "Triggering refresh..."
+            $refreshUri = "groups/$workspaceID/datasets/$modelId/refreshes"
+            $refreshBody = @{
+                notifyOption = "NoNotification"
+            } | ConvertTo-Json
+
+            Invoke-PowerBIRestMethod -Url $refreshUri -Method POST -Body $refreshBody
+            Write-Host "Refresh triggered successfully"
 
             # Check refresh status
-            Write-Host "Checking refresh status..."
-            $statusUri = "$refreshUri"
-            $status = Invoke-PowerBIRestMethod -url $statusUri -method GET
-            Write-Host "Refresh status: $status"
+            Start-Sleep -Seconds 10
+            $statusUri = "groups/$workspaceID/datasets/$modelId/refreshes"
+            $status = Invoke-PowerBIRestMethod -Url $statusUri -Method GET | ConvertFrom-Json
+            Write-Host "Current refresh status: $($status.value[0].status)"
+
         }
         catch {
-            Write-Warning "Refresh attempt encountered an issue: $_"
-            Write-Warning "Continuing with deployment despite refresh warning"
+            Write-Warning "Data source configuration error: $_"
+            Write-Warning "Please check data source credentials in UAT"
         }
     }
     catch {
