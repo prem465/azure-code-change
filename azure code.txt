@@ -9311,26 +9311,22 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
-# Add this right after successful model import, before any other operations
+# Add this right after your model import in the "Both" scenario
 if ($importedModel) {
-    Write-Host "Initializing semantic model in UAT..."
+    Write-Host "Initializing semantic model after deployment..."
     try {
-        # Simple refresh trigger
-        $refreshUri = "workspaces/$workspaceID/items/$($importedModel.id)/refresh"
-        Invoke-FabricAPIRequest -Uri $refreshUri -Method POST
-        Write-Host "Refresh triggered for semantic model"
+        # Use Invoke-SemanticModelRefresh to properly initialize the model
+        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID `
+            -SemanticModelId $importedModel.id `
+            -Credential $credential `
+            -TenantId $tenantId `
+            -Environment Public `
+            -LogOutput "ADO"
         
-        # Give it some time to process
-        Write-Host "Waiting for refresh to initialize..."
-        Start-Sleep -Seconds 30
-        
-        # Check refresh status
-        $statusUri = "workspaces/$workspaceID/items/$($importedModel.id)/refreshes"
-        $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
-        Write-Host "Initial refresh status: $($refreshStatus.status)"
+        Write-Host "Semantic model refresh completed successfully"
     }
     catch {
-        Write-Warning "Initial data refresh attempt encountered an issue - manual refresh may be needed"
-        Write-Warning "Error details: $_"
+        Write-Warning "Semantic model refresh encountered an issue: $_"
+        Write-Warning "This might affect report data visibility"
     }
 }
