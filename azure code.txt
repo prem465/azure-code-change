@@ -9311,67 +9311,79 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
+# Add this after your model import in both scenarios
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        $modelId = $importedModel.id
-        Write-Host "Model imported with ID: $modelId"
+        # Using your existing authentication
+        $secret = $env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force
+        $credential = [System.Management.Automation.PSCredential]::new($env:CLIENT_ID, $secret)
         
-        # Wait for model registration
-        Write-Host "Waiting for model to be registered..."
-        Start-Sleep -Seconds 15
+        if ($isServicePrincipal) {
+            Write-Host "Setting up service principal connection..."
+            Set-FabricAuthToken -servicePrincipalId $credential.UserName `
+                -servicePrincipalSecret $plainTextPwd `
+                -tenantId $env:TENANT_ID -reset
+        }
 
+        # Verify model deployment
+        Write-Host "Model imported with ID: $($importedModel.id)"
+        
+        # Use FabricAPI consistent with your approach
         try {
-            # First ensure Power BI connection
-            if ($isSPN) {
-                Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $tenantId
-            }
-
-            # Get the datasources to set credentials
-            Write-Host "Getting datasource information..."
-            $datasourcesUri = "groups/$workspaceID/datasets/$modelId/datasources"
-            $datasources = Invoke-PowerBIRestMethod -Url $datasourcesUri -Method GET | ConvertFrom-Json
-
-            foreach ($datasource in $datasources.value) {
-                Write-Host "Setting credentials for datasource: $($datasource.datasourceId)"
+            # Wait for model to be ready
+            Start-Sleep -Seconds 15
+            
+            # Verify model access
+            $modelUri = "workspaces/$workspaceID/items/$($importedModel.id)"
+            $modelCheck = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
+            
+            if ($modelCheck) {
+                Write-Host "Model verification successful, attempting refresh..."
                 
-                # Prepare credential body based on gateway datasource
-                $credBody = @{
-                    credentialDetails = @{
-                        credentials = "{`"credentialData`":[{`"name`":`"username`",`"value`":`"$($env:CLIENT_ID)`"},{`"name`":`"password`",`"value`":`"$($env:CLIENT_SECRET)`"}]}"
-                        credentialType = "Basic"
-                        useEndUserOAuth2Credentials = "False"
-                        privacyLevel = "Organizational"
+                # Try to refresh using Fabric API
+                $refreshUri = "workspaces/$workspaceID/items/$($importedModel.id)/refresh"
+                Invoke-FabricAPIRequest -Uri $refreshUri -Method POST
+                
+                # Monitor refresh status
+                $attempts = 0
+                $maxAttempts = 6
+                $refreshComplete = $false
+                
+                while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
+                    Start-Sleep -Seconds 10
+                    $attempts++
+                    
+                    $statusUri = "workspaces/$workspaceID/items/$($importedModel.id)/refreshes"
+                    $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
+                    
+                    if ($refreshStatus.status -eq "Completed") {
+                        Write-Host "Refresh completed successfully"
+                        $refreshComplete = $true
                     }
-                } | ConvertTo-Json -Depth 10
+                    elseif ($refreshStatus.status -eq "Failed") {
+                        Write-Warning "Refresh attempt failed - continuing deployment"
+                        break
+                    }
+                    
+                    Write-Host "Checking refresh status... Attempt $attempts of $maxAttempts"
+                }
 
-                # Set credentials
-                $credentialsUri = "groups/$workspaceID/datasets/$modelId/Default.SetAllConnections"
-                Invoke-PowerBIRestMethod -Url $credentialsUri -Method POST -Body $credBody
-                Write-Host "Credentials set successfully"
+                if (-not $refreshComplete) {
+                    Write-Warning "Refresh did not complete in expected time - continuing deployment"
+                }
             }
-
-            # Now trigger refresh
-            Write-Host "Triggering refresh..."
-            $refreshUri = "groups/$workspaceID/datasets/$modelId/refreshes"
-            $refreshBody = @{
-                notifyOption = "NoNotification"
-            } | ConvertTo-Json
-
-            Invoke-PowerBIRestMethod -Url $refreshUri -Method POST -Body $refreshBody
-            Write-Host "Refresh triggered successfully"
-
-            # Check refresh status
-            Start-Sleep -Seconds 10
-            $statusUri = "groups/$workspaceID/datasets/$modelId/refreshes"
-            $status = Invoke-PowerBIRestMethod -Url $statusUri -Method GET | ConvertFrom-Json
-            Write-Host "Current refresh status: $($status.value[0].status)"
-
+            else {
+                Write-Warning "Model verification failed - continuing deployment"
+            }
         }
         catch {
-            Write-Warning "Data source configuration error: $_"
-            Write-Warning "Please check data source credentials in UAT"
+            Write-Warning "Refresh attempt warning: $_"
+            Write-Warning "Continuing with deployment despite refresh warning"
         }
+
+        # Consistent with your code's flow - refresh items list
+        $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
     }
     catch {
         Write-Warning "Model initialization warning: $_"
