@@ -9312,24 +9312,115 @@ if ($bothBases.Count -gt 0) {
 
 
 if ($importedModel) {
-    Write-Host "Initializing semantic model after deployment..."
+    Write-Host "=== Starting Semantic Model Initialization Process ==="
     try {
-        # Give time for model to be registered
-        Start-Sleep -Seconds 15
-        Write-Host "Starting semantic model refresh for ID: $($importedModel.id)"
+        $modelId = $importedModel.id
+        Write-Host "Model Details:"
+        Write-Host "- Model ID: $modelId"
+        Write-Host "- Model Name: $($importedModel.displayName)"
+        Write-Host "- Workspace ID: $workspaceID"
 
-        Invoke-SemanticModelRefresh `
-            -WorkspaceId $workspaceID `
-            -SemanticModelId $importedModel.id `
-            -Credential $credential `
-            -TenantId $tenantId `
-            -Environment Public `
-            -LogOutput "ADO"  # Use ADO as per module requirements
-        
-        Write-Host "Semantic model refresh initiated successfully"
+        # Step 1: Verify Service Principal
+        Write-Host "`nStep 1: Verifying Service Principal..."
+        if ($isSPN) {
+            try {
+                Write-Host "- Attempting Power BI connection with Service Principal"
+                Connect-PowerBIServiceAccount -ServicePrincipal `
+                    -Credential $credential `
+                    -TenantId $tenantId
+                Write-Host "✓ Service Principal connection successful"
+            }
+            catch {
+                Write-Error "× Service Principal connection failed: $_"
+                throw
+            }
+        }
+
+        # Step 2: Verify Model Accessibility
+        Write-Host "`nStep 2: Verifying Model Accessibility..."
+        try {
+            $modelUri = "workspaces/$workspaceID/items/$modelId"
+            $modelCheck = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
+            Write-Host "✓ Model is accessible in workspace"
+            Write-Host "- Model Status: $($modelCheck.status)"
+        }
+        catch {
+            Write-Error "× Model accessibility check failed: $_"
+            Write-Warning "This might indicate permission or deployment issues"
+            throw
+        }
+
+        # Step 3: Initiate Refresh
+        Write-Host "`nStep 3: Initiating Semantic Model Refresh..."
+        try {
+            Write-Host "- Starting refresh with following parameters:"
+            Write-Host "  * Workspace ID: $workspaceID"
+            Write-Host "  * Model ID: $modelId"
+            Write-Host "  * Environment: Public"
+            Write-Host "  * Log Output: ADO"
+
+            $refreshResult = Invoke-SemanticModelRefresh `
+                -WorkspaceId $workspaceID `
+                -SemanticModelId $modelId `
+                -Credential $credential `
+                -TenantId $tenantId `
+                -Environment "Public" `
+                -LogOutput "ADO" `
+                -Verbose
+
+            Write-Host "- Refresh request submitted"
+            Write-Host "- Refresh Request ID: $($refreshResult.id)"
+        }
+        catch {
+            Write-Error "× Refresh initiation failed"
+            Write-Error "Error Details: $_"
+            Write-Error "Error Type: $($_.Exception.GetType().Name)"
+            Write-Error "Stack Trace: $($_.ScriptStackTrace)"
+            throw
+        }
+
+        # Step 4: Monitor Refresh Status
+        Write-Host "`nStep 4: Monitoring Refresh Status..."
+        try {
+            $attempts = 0
+            $maxAttempts = 6
+            $refreshComplete = $false
+
+            while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
+                Start-Sleep -Seconds 10
+                $attempts++
+                Write-Host "- Checking refresh status (Attempt $attempts of $maxAttempts)"
+
+                $statusUri = "workspaces/$workspaceID/items/$modelId/refreshes"
+                $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
+                Write-Host "  Current Status: $($refreshStatus.status)"
+
+                if ($refreshStatus.status -eq "Completed") {
+                    Write-Host "✓ Refresh completed successfully"
+                    $refreshComplete = $true
+                }
+                elseif ($refreshStatus.status -eq "Failed") {
+                    Write-Error "× Refresh failed with message: $($refreshStatus.errorMessage)"
+                    throw "Refresh failed"
+                }
+            }
+
+            if (-not $refreshComplete) {
+                Write-Warning "! Refresh did not complete within expected time"
+            }
+        }
+        catch {
+            Write-Error "× Error during refresh monitoring: $_"
+            throw
+        }
+
+        Write-Host "`n=== Semantic Model Initialization Process Complete ==="
     }
     catch {
-        Write-Warning "Semantic model refresh warning: $_"
-        Write-Warning "Continuing with deployment"
+        Write-Error "=== Semantic Model Initialization Failed ==="
+        Write-Error "Final Error: $_"
+        Write-Error "Error Type: $($_.Exception.GetType().Name)"
+        Write-Error "Stack Trace: $($_.ScriptStackTrace)"
+        Write-Warning "Continuing with deployment despite refresh failure"
     }
 }
