@@ -9314,20 +9314,22 @@ if ($bothBases.Count -gt 0) {
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        Write-Host "Model imported with ID: $($importedModel.id)"
-        
-        # Use the universal approach
-        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID `
+        # Give time for model to be registered
+        Start-Sleep -Seconds 15
+        Write-Host "Starting semantic model refresh for ID: $($importedModel.id)"
+
+        Invoke-SemanticModelRefresh `
+            -WorkspaceId $workspaceID `
             -SemanticModelId $importedModel.id `
             -Credential $credential `
             -TenantId $tenantId `
             -Environment Public `
-            -LogOutput "ADO"
+            -LogOutput "ADO"  # Use ADO as per module requirements
         
-        Write-Host "Refresh initiated for model: $($importedModel.displayName)"
+        Write-Host "Semantic model refresh initiated successfully"
     }
     catch {
-        Write-Warning "Model refresh warning: $_"
+        Write-Warning "Semantic model refresh warning: $_"
         Write-Warning "Continuing with deployment"
     }
 }
