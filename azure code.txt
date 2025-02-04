@@ -9312,139 +9312,147 @@ if ($bothBases.Count -gt 0) {
 
 
 if ($importedModel) {
-    Write-Host "`n=== Semantic Model Refresh - Detailed Diagnostics ===`n"
+    Write-Host "`n=== Semantic Model Refresh - Direct API Method - Detailed Diagnostics ===`n"
     try {
-        # 1. Authentication Diagnostics
-        Write-Host "1. AUTHENTICATION CHECKS:"
-        Write-Host "----------------------------------------"
-        Write-Host "Service Principal Details:"
-        Write-Host "- Is Service Principal: $isSPN"
-        Write-Host "- Tenant ID: $tenantId"
-        
-        try {
-            if ($isSPN) {
-                Write-Host "`nAttempting Service Principal Connection..."
-                
-                # Clear any existing connections
-                Disconnect-PowerBIServiceAccount
-                Write-Host "- Cleared existing connections"
-                
-                # Test connection
-                Connect-PowerBIServiceAccount -ServicePrincipal `
-                    -Credential $credential `
-                    -TenantId $tenantId
-                Write-Host "✓ Service Principal connection successful"
-
-                # Verify connection
-                $context = Get-PowerBIAccessToken
-                Write-Host "Access Token Details:"
-                Write-Host "- Token Type: $($context.TokenType)"
-                Write-Host "- Expiration: $($context.ExpirationTime)"
-            }
-        }
-        catch {
-            Write-Error "× Authentication Failed"
-            Write-Error "Error Details: $_"
-            Write-Error "Auth Error Type: $($_.Exception.GetType().Name)"
-            throw
-        }
-
-        # 2. Workspace Access Check
-        Write-Host "`n2. WORKSPACE ACCESS VERIFICATION:"
+        # 1. Authentication Setup
+        Write-Host "1. AUTHENTICATION SETUP:"
         Write-Host "----------------------------------------"
         try {
-            Write-Host "Checking workspace access..."
-            $workspace = Get-PowerBIWorkspace -Id $workspaceID
-            Write-Host "Workspace Details:"
-            Write-Host "- Name: $($workspace.Name)"
-            Write-Host "- ID: $($workspace.Id)"
-            Write-Host "- Access: $($workspace.AccessRight)"
-            Write-Host "✓ Workspace access verified"
-        }
-        catch {
-            Write-Error "× Workspace access check failed"
-            Write-Error "Error: $_"
-            throw
-        }
+            Write-Host "Clearing existing connections..."
+            Disconnect-PowerBIServiceAccount
+            Write-Host "✓ Existing connections cleared"
 
-        # 3. Model Access Check
-        Write-Host "`n3. MODEL ACCESS VERIFICATION:"
-        Write-Host "----------------------------------------"
-        try {
-            Write-Host "Checking model access..."
-            $modelUri = "workspaces/$workspaceID/items/$($importedModel.id)"
-            $modelDetails = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
-            Write-Host "Model Details:"
-            Write-Host "- ID: $($importedModel.id)"
-            Write-Host "- Name: $($modelDetails.displayName)"
-            Write-Host "- Type: $($modelDetails.type)"
-            Write-Host "✓ Model access verified"
-        }
-        catch {
-            Write-Error "× Model access check failed"
-            Write-Error "Error: $_"
-            throw
-        }
-
-        # 4. Refresh Attempt
-        Write-Host "`n4. REFRESH OPERATION:"
-        Write-Host "----------------------------------------"
-        try {
-            Write-Host "Initiating refresh..."
-            Write-Host "Request Parameters:"
-            Write-Host "- Workspace ID: $workspaceID"
-            Write-Host "- Model ID: $($importedModel.id)"
-            Write-Host "- Environment: Public"
-
-            $result = Invoke-SemanticModelRefresh `
-                -WorkspaceId $workspaceID `
-                -SemanticModelId $importedModel.id `
+            Write-Host "`nService Principal Details:"
+            Write-Host "- Is Service Principal: $isSPN"
+            Write-Host "- Tenant ID: $tenantId"
+            
+            Connect-PowerBIServiceAccount -ServicePrincipal `
                 -Credential $credential `
-                -TenantId $tenantId `
-                -Environment Public `
-                -LogOutput "ADO" `
-                -Verbose
+                -TenantId $tenantId
+            Write-Host "✓ New Power BI connection established"
 
+            # Verify connection
+            $connectionTest = Get-PowerBIWorkspace -Id $workspaceID
+            Write-Host "✓ Connection test successful"
+        }
+        catch {
+            Write-Error "× Authentication failed"
+            Write-Error "Error Details: $_"
+            throw
+        }
+
+        # 2. Model Verification
+        Write-Host "`n2. MODEL VERIFICATION:"
+        Write-Host "----------------------------------------"
+        try {
+            Write-Host "Model Details:"
+            Write-Host "- Model ID: $($importedModel.id)"
+            Write-Host "- Workspace ID: $workspaceID"
+
+            $modelUri = "groups/$workspaceID/datasets/$($importedModel.id)"
+            $modelCheck = Invoke-PowerBIRestMethod -Url $modelUri -Method GET
+            Write-Host "✓ Model accessible in workspace"
+        }
+        catch {
+            Write-Error "× Model verification failed: $_"
+            throw
+        }
+
+        # 3. Direct Refresh Attempt
+        Write-Host "`n3. REFRESH OPERATION (Direct API):"
+        Write-Host "----------------------------------------"
+        try {
+            $refreshUri = "groups/$workspaceID/datasets/$($importedModel.id)/refreshes"
+            Write-Host "Refresh URI: $refreshUri"
+
+            $refreshBody = @{
+                type = "full"
+                notifyOption = "NoNotification"
+                commitMode = "transactional"
+            } | ConvertTo-Json
+
+            Write-Host "Submitting refresh request..."
+            Write-Host "Request Body: $refreshBody"
+
+            $refreshResponse = Invoke-PowerBIRestMethod -Url $refreshUri -Method POST -Body $refreshBody
             Write-Host "✓ Refresh request submitted"
-            Write-Host "Response Details:"
-            Write-Host $result
+
+            # 4. Monitor Refresh Status
+            Write-Host "`n4. REFRESH STATUS MONITORING:"
+            Write-Host "----------------------------------------"
+            $attempts = 0
+            $maxAttempts = 6
+            $refreshComplete = $false
+
+            while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
+                Start-Sleep -Seconds 10
+                $attempts++
+                
+                Write-Host "Checking refresh status (Attempt $attempts of $maxAttempts)..."
+                
+                $statusUri = "groups/$workspaceID/datasets/$($importedModel.id)/refreshes"
+                $status = Invoke-PowerBIRestMethod -Url $statusUri -Method GET | ConvertFrom-Json
+                
+                if ($status.value.Count -gt 0) {
+                    $latestStatus = $status.value[0].status
+                    Write-Host "Current Status: $latestStatus"
+                    
+                    switch ($latestStatus) {
+                        "Completed" {
+                            Write-Host "✓ Refresh completed successfully"
+                            $refreshComplete = $true
+                        }
+                        "Failed" {
+                            Write-Error "× Refresh failed"
+                            Write-Error "Error Details: $($status.value[0].errorMessage)"
+                            throw "Refresh failed"
+                        }
+                        "InProgress" {
+                            Write-Host "- Refresh still in progress..."
+                        }
+                        default {
+                            Write-Host "- Status: $latestStatus"
+                        }
+                    }
+                }
+            }
+
+            if (-not $refreshComplete) {
+                Write-Warning "! Refresh status check timed out"
+            }
         }
         catch {
             Write-Error "× Refresh operation failed"
             Write-Error "Error Type: $($_.Exception.GetType().Name)"
             Write-Error "Error Message: $_"
-            Write-Error "Stack Trace: $($_.ScriptStackTrace)"
-            
-            # Additional error analysis
+            if ($_.ErrorDetails) {
+                Write-Error "Additional Details: $($_.ErrorDetails.Message)"
+            }
             if ($_.Exception.Response) {
                 Write-Error "Response Status: $($_.Exception.Response.StatusCode)"
-                Write-Error "Response Body: $($_.ErrorDetails.Message)"
             }
             throw
         }
 
-        # 5. Token Verification
-        Write-Host "`n5. TOKEN VERIFICATION:"
+        # 5. Final Status Check
+        Write-Host "`n5. FINAL STATUS CHECK:"
         Write-Host "----------------------------------------"
         try {
-            $token = Get-PowerBIAccessToken
-            Write-Host "Current Token Status:"
-            Write-Host "- Token Type: $($token.TokenType)"
-            Write-Host "- Expiration Time: $($token.ExpirationTime)"
-            Write-Host "- Time Until Expiration: $(($token.ExpirationTime - (Get-Date)).TotalMinutes) minutes"
-            Write-Host "✓ Token verification complete"
+            $finalCheckUri = "groups/$workspaceID/datasets/$($importedModel.id)"
+            $finalStatus = Invoke-PowerBIRestMethod -Url $finalCheckUri -Method GET | ConvertFrom-Json
+            Write-Host "Model Status: $($finalStatus.refreshState)"
+            Write-Host "Last Refresh: $($finalStatus.lastRefresh)"
         }
         catch {
-            Write-Warning "Token verification failed: $_"
+            Write-Warning "Final status check failed: $_"
         }
 
-        Write-Host "`n=== Diagnostic Summary ==="
+        Write-Host "`n=== Operation Summary ==="
         Write-Host "----------------------------------------"
-        Write-Host "Authentication: Completed"
-        Write-Host "Workspace Access: Verified"
-        Write-Host "Model Access: Verified"
-        Write-Host "Refresh Attempt: Completed"
-        Write-Host "Token Status: Verified"
+        Write-Host "Authentication: Success"
+        Write-Host "Model Verification: Success"
+        Write-Host "Refresh Attempt: Complete"
+        Write-Host "Final Status: Verified"
     }
     catch {
         Write-Error "`n!!! OPERATION FAILED !!!"
@@ -9452,7 +9460,6 @@ if ($importedModel) {
         Write-Error "- Type: $($_.Exception.GetType().Name)"
         Write-Error "- Message: $_"
         Write-Error "- Location: $($_.InvocationInfo.PositionMessage)"
-        Write-Error "- Stack Trace: $($_.ScriptStackTrace)"
         Write-Warning "Continuing with deployment despite refresh failure"
     }
 }
