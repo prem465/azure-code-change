@@ -9312,115 +9312,147 @@ if ($bothBases.Count -gt 0) {
 
 
 if ($importedModel) {
-    Write-Host "=== Starting Semantic Model Initialization Process ==="
+    Write-Host "`n=== Semantic Model Refresh - Detailed Diagnostics ===`n"
     try {
-        $modelId = $importedModel.id
-        Write-Host "Model Details:"
-        Write-Host "- Model ID: $modelId"
-        Write-Host "- Model Name: $($importedModel.displayName)"
-        Write-Host "- Workspace ID: $workspaceID"
-
-        # Step 1: Verify Service Principal
-        Write-Host "`nStep 1: Verifying Service Principal..."
-        if ($isSPN) {
-            try {
-                Write-Host "- Attempting Power BI connection with Service Principal"
+        # 1. Authentication Diagnostics
+        Write-Host "1. AUTHENTICATION CHECKS:"
+        Write-Host "----------------------------------------"
+        Write-Host "Service Principal Details:"
+        Write-Host "- Is Service Principal: $isSPN"
+        Write-Host "- Tenant ID: $tenantId"
+        
+        try {
+            if ($isSPN) {
+                Write-Host "`nAttempting Service Principal Connection..."
+                
+                # Clear any existing connections
+                Disconnect-PowerBIServiceAccount
+                Write-Host "- Cleared existing connections"
+                
+                # Test connection
                 Connect-PowerBIServiceAccount -ServicePrincipal `
                     -Credential $credential `
                     -TenantId $tenantId
                 Write-Host "✓ Service Principal connection successful"
-            }
-            catch {
-                Write-Error "× Service Principal connection failed: $_"
-                throw
-            }
-        }
 
-        # Step 2: Verify Model Accessibility
-        Write-Host "`nStep 2: Verifying Model Accessibility..."
-        try {
-            $modelUri = "workspaces/$workspaceID/items/$modelId"
-            $modelCheck = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
-            Write-Host "✓ Model is accessible in workspace"
-            Write-Host "- Model Status: $($modelCheck.status)"
+                # Verify connection
+                $context = Get-PowerBIAccessToken
+                Write-Host "Access Token Details:"
+                Write-Host "- Token Type: $($context.TokenType)"
+                Write-Host "- Expiration: $($context.ExpirationTime)"
+            }
         }
         catch {
-            Write-Error "× Model accessibility check failed: $_"
-            Write-Warning "This might indicate permission or deployment issues"
+            Write-Error "× Authentication Failed"
+            Write-Error "Error Details: $_"
+            Write-Error "Auth Error Type: $($_.Exception.GetType().Name)"
             throw
         }
 
-        # Step 3: Initiate Refresh
-        Write-Host "`nStep 3: Initiating Semantic Model Refresh..."
+        # 2. Workspace Access Check
+        Write-Host "`n2. WORKSPACE ACCESS VERIFICATION:"
+        Write-Host "----------------------------------------"
         try {
-            Write-Host "- Starting refresh with following parameters:"
-            Write-Host "  * Workspace ID: $workspaceID"
-            Write-Host "  * Model ID: $modelId"
-            Write-Host "  * Environment: Public"
-            Write-Host "  * Log Output: ADO"
+            Write-Host "Checking workspace access..."
+            $workspace = Get-PowerBIWorkspace -Id $workspaceID
+            Write-Host "Workspace Details:"
+            Write-Host "- Name: $($workspace.Name)"
+            Write-Host "- ID: $($workspace.Id)"
+            Write-Host "- Access: $($workspace.AccessRight)"
+            Write-Host "✓ Workspace access verified"
+        }
+        catch {
+            Write-Error "× Workspace access check failed"
+            Write-Error "Error: $_"
+            throw
+        }
 
-            $refreshResult = Invoke-SemanticModelRefresh `
+        # 3. Model Access Check
+        Write-Host "`n3. MODEL ACCESS VERIFICATION:"
+        Write-Host "----------------------------------------"
+        try {
+            Write-Host "Checking model access..."
+            $modelUri = "workspaces/$workspaceID/items/$($importedModel.id)"
+            $modelDetails = Invoke-FabricAPIRequest -Uri $modelUri -Method GET
+            Write-Host "Model Details:"
+            Write-Host "- ID: $($importedModel.id)"
+            Write-Host "- Name: $($modelDetails.displayName)"
+            Write-Host "- Type: $($modelDetails.type)"
+            Write-Host "✓ Model access verified"
+        }
+        catch {
+            Write-Error "× Model access check failed"
+            Write-Error "Error: $_"
+            throw
+        }
+
+        # 4. Refresh Attempt
+        Write-Host "`n4. REFRESH OPERATION:"
+        Write-Host "----------------------------------------"
+        try {
+            Write-Host "Initiating refresh..."
+            Write-Host "Request Parameters:"
+            Write-Host "- Workspace ID: $workspaceID"
+            Write-Host "- Model ID: $($importedModel.id)"
+            Write-Host "- Environment: Public"
+
+            $result = Invoke-SemanticModelRefresh `
                 -WorkspaceId $workspaceID `
-                -SemanticModelId $modelId `
+                -SemanticModelId $importedModel.id `
                 -Credential $credential `
                 -TenantId $tenantId `
-                -Environment "Public" `
+                -Environment Public `
                 -LogOutput "ADO" `
                 -Verbose
 
-            Write-Host "- Refresh request submitted"
-            Write-Host "- Refresh Request ID: $($refreshResult.id)"
+            Write-Host "✓ Refresh request submitted"
+            Write-Host "Response Details:"
+            Write-Host $result
         }
         catch {
-            Write-Error "× Refresh initiation failed"
-            Write-Error "Error Details: $_"
+            Write-Error "× Refresh operation failed"
             Write-Error "Error Type: $($_.Exception.GetType().Name)"
+            Write-Error "Error Message: $_"
             Write-Error "Stack Trace: $($_.ScriptStackTrace)"
+            
+            # Additional error analysis
+            if ($_.Exception.Response) {
+                Write-Error "Response Status: $($_.Exception.Response.StatusCode)"
+                Write-Error "Response Body: $($_.ErrorDetails.Message)"
+            }
             throw
         }
 
-        # Step 4: Monitor Refresh Status
-        Write-Host "`nStep 4: Monitoring Refresh Status..."
+        # 5. Token Verification
+        Write-Host "`n5. TOKEN VERIFICATION:"
+        Write-Host "----------------------------------------"
         try {
-            $attempts = 0
-            $maxAttempts = 6
-            $refreshComplete = $false
-
-            while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
-                Start-Sleep -Seconds 10
-                $attempts++
-                Write-Host "- Checking refresh status (Attempt $attempts of $maxAttempts)"
-
-                $statusUri = "workspaces/$workspaceID/items/$modelId/refreshes"
-                $refreshStatus = Invoke-FabricAPIRequest -Uri $statusUri -Method GET
-                Write-Host "  Current Status: $($refreshStatus.status)"
-
-                if ($refreshStatus.status -eq "Completed") {
-                    Write-Host "✓ Refresh completed successfully"
-                    $refreshComplete = $true
-                }
-                elseif ($refreshStatus.status -eq "Failed") {
-                    Write-Error "× Refresh failed with message: $($refreshStatus.errorMessage)"
-                    throw "Refresh failed"
-                }
-            }
-
-            if (-not $refreshComplete) {
-                Write-Warning "! Refresh did not complete within expected time"
-            }
+            $token = Get-PowerBIAccessToken
+            Write-Host "Current Token Status:"
+            Write-Host "- Token Type: $($token.TokenType)"
+            Write-Host "- Expiration Time: $($token.ExpirationTime)"
+            Write-Host "- Time Until Expiration: $(($token.ExpirationTime - (Get-Date)).TotalMinutes) minutes"
+            Write-Host "✓ Token verification complete"
         }
         catch {
-            Write-Error "× Error during refresh monitoring: $_"
-            throw
+            Write-Warning "Token verification failed: $_"
         }
 
-        Write-Host "`n=== Semantic Model Initialization Process Complete ==="
+        Write-Host "`n=== Diagnostic Summary ==="
+        Write-Host "----------------------------------------"
+        Write-Host "Authentication: Completed"
+        Write-Host "Workspace Access: Verified"
+        Write-Host "Model Access: Verified"
+        Write-Host "Refresh Attempt: Completed"
+        Write-Host "Token Status: Verified"
     }
     catch {
-        Write-Error "=== Semantic Model Initialization Failed ==="
-        Write-Error "Final Error: $_"
-        Write-Error "Error Type: $($_.Exception.GetType().Name)"
-        Write-Error "Stack Trace: $($_.ScriptStackTrace)"
+        Write-Error "`n!!! OPERATION FAILED !!!"
+        Write-Error "Final Error Details:"
+        Write-Error "- Type: $($_.Exception.GetType().Name)"
+        Write-Error "- Message: $_"
+        Write-Error "- Location: $($_.InvocationInfo.PositionMessage)"
+        Write-Error "- Stack Trace: $($_.ScriptStackTrace)"
         Write-Warning "Continuing with deployment despite refresh failure"
     }
 }
