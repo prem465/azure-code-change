@@ -9314,84 +9314,20 @@ if ($bothBases.Count -gt 0) {
 if ($importedModel) {
     Write-Host "Initializing semantic model after deployment..."
     try {
-        # First verify model exists and is accessible
-        Write-Host "Model verification..."
-        try {
-            Start-Sleep -Seconds 15  # Give time for model registration
-            $checkUri = "workspaces/$workspaceID/items/$($importedModel.id)"
-            $modelCheck = Invoke-FabricAPIRequest -Uri $checkUri -Method GET
-            Write-Host "Model verification successful"
-
-            # Get dataset ID for refresh
-            $datasetsUri = "workspaces/$workspaceID/items/$($importedModel.id)/datasets"
-            $datasets = Invoke-FabricAPIRequest -Uri $datasetsUri -Method GET
-            
-            if ($datasets) {
-                $datasetId = $datasets.id
-                Write-Host "Found dataset ID: $datasetId"
-
-                # Try refresh using alternate endpoint
-                $altRefreshUri = "groups/$workspaceID/datasets/$datasetId/refreshes"
-                $refreshBody = @{
-                    type = "full"
-                    commitMode = "transactional"
-                    maxParallelism = 10
-                    retryCount = 2
-                } | ConvertTo-Json
-
-                try {
-                    # Ensure Power BI connection
-                    if ($isSPN) {
-                        Connect-PowerBIServiceAccount -ServicePrincipal `
-                            -Credential $credential `
-                            -TenantId $tenantId
-                    }
-
-                    Write-Host "Triggering refresh..."
-                    Invoke-PowerBIRestMethod -Url $altRefreshUri -Method POST -Body $refreshBody
-                    Write-Host "Refresh triggered, monitoring status..."
-
-                    # Monitor refresh
-                    $attempts = 0
-                    $maxAttempts = 6
-                    while ($attempts -lt $maxAttempts) {
-                        Start-Sleep -Seconds 10
-                        $attempts++
-                        
-                        $statusUri = "groups/$workspaceID/datasets/$datasetId/refreshes"
-                        $status = Invoke-PowerBIRestMethod -Url $statusUri -Method GET | ConvertFrom-Json
-                        
-                        if ($status.value[0].status -eq "Completed") {
-                            Write-Host "Refresh completed successfully"
-                            break
-                        }
-                        elseif ($status.value[0].status -eq "Failed") {
-                            Write-Warning "Refresh failed but continuing deployment"
-                            break
-                        }
-                        
-                        Write-Host "Checking refresh status... Attempt $attempts of $maxAttempts"
-                    }
-                }
-                catch {
-                    Write-Warning "Refresh process warning: $_"
-                    Write-Warning "Continuing with deployment despite refresh warning"
-                }
-            }
-            else {
-                Write-Warning "Could not find dataset ID, skipping refresh"
-            }
-        }
-        catch {
-            Write-Warning "Model verification error: $_"
-            Write-Warning "Continuing with deployment"
-        }
-
-        # Ensure items list is updated
-        $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
+        Write-Host "Model imported with ID: $($importedModel.id)"
+        
+        # Use the universal approach
+        Invoke-SemanticModelRefresh -WorkspaceId $workspaceID `
+            -SemanticModelId $importedModel.id `
+            -Credential $credential `
+            -TenantId $tenantId `
+            -Environment Public `
+            -LogOutput "ADO"
+        
+        Write-Host "Refresh initiated for model: $($importedModel.displayName)"
     }
     catch {
-        Write-Warning "Model initialization warning: $_"
+        Write-Warning "Model refresh warning: $_"
         Write-Warning "Continuing with deployment"
     }
 }
