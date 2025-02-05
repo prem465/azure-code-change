@@ -9311,155 +9311,34 @@ if ($bothBases.Count -gt 0) {
 -----------------------------------
 
 
-if ($importedModel) {
-    Write-Host "`n=== Semantic Model Refresh - Direct API Method - Detailed Diagnostics ===`n"
+# ===================== After importing each semantic model =====================
+
+# Suppose you stored newly imported model objects in $importedModels
+#  e.g., $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+#        $importedModels += $importedModel
+#
+# Right after your "import" loop finishes, place this snippet:
+
+Write-Host "`n=== Refreshing Imported Semantic Models ==="
+
+foreach ($model in $importedModels) {
     try {
-        # 1. Authentication Setup
-        Write-Host "1. AUTHENTICATION SETUP:"
-        Write-Host "----------------------------------------"
-        try {
-            Write-Host "Clearing existing connections..."
-            Disconnect-PowerBIServiceAccount
-            Write-Host "✓ Existing connections cleared"
+        Write-Host "Refreshing => $($model.displayName) [ID=$($model.id)]"
 
-            Write-Host "`nService Principal Details:"
-            Write-Host "- Is Service Principal: $isSPN"
-            Write-Host "- Tenant ID: $tenantId"
-            
-            Connect-PowerBIServiceAccount -ServicePrincipal `
-                -Credential $credential `
-                -TenantId $tenantId
-            Write-Host "✓ New Power BI connection established"
+        Invoke-SemanticModelRefresh `
+            -WorkspaceId $workspaceID `
+            -SemanticModelId $model.id `
+            -Credential $credential `
+            -TenantId $env:TENANT_ID `
+            -Environment Public `
+            -LogOutput "ADO"
 
-            # Verify connection
-            $connectionTest = Get-PowerBIWorkspace -Id $workspaceID
-            Write-Host "✓ Connection test successful"
-        }
-        catch {
-            Write-Error "× Authentication failed"
-            Write-Error "Error Details: $_"
-            throw
-        }
-
-        # 2. Model Verification
-        Write-Host "`n2. MODEL VERIFICATION:"
-        Write-Host "----------------------------------------"
-        try {
-            Write-Host "Model Details:"
-            Write-Host "- Model ID: $($importedModel.id)"
-            Write-Host "- Workspace ID: $workspaceID"
-
-            $modelUri = "groups/$workspaceID/datasets/$($importedModel.id)"
-            $modelCheck = Invoke-PowerBIRestMethod -Url $modelUri -Method GET
-            Write-Host "✓ Model accessible in workspace"
-        }
-        catch {
-            Write-Error "× Model verification failed: $_"
-            throw
-        }
-
-        # 3. Direct Refresh Attempt
-        Write-Host "`n3. REFRESH OPERATION (Direct API):"
-        Write-Host "----------------------------------------"
-        try {
-            $refreshUri = "groups/$workspaceID/datasets/$($importedModel.id)/refreshes"
-            Write-Host "Refresh URI: $refreshUri"
-
-            $refreshBody = @{
-                type = "full"
-                notifyOption = "NoNotification"
-                commitMode = "transactional"
-            } | ConvertTo-Json
-
-            Write-Host "Submitting refresh request..."
-            Write-Host "Request Body: $refreshBody"
-
-            $refreshResponse = Invoke-PowerBIRestMethod -Url $refreshUri -Method POST -Body $refreshBody
-            Write-Host "✓ Refresh request submitted"
-
-            # 4. Monitor Refresh Status
-            Write-Host "`n4. REFRESH STATUS MONITORING:"
-            Write-Host "----------------------------------------"
-            $attempts = 0
-            $maxAttempts = 6
-            $refreshComplete = $false
-
-            while ($attempts -lt $maxAttempts -and -not $refreshComplete) {
-                Start-Sleep -Seconds 10
-                $attempts++
-                
-                Write-Host "Checking refresh status (Attempt $attempts of $maxAttempts)..."
-                
-                $statusUri = "groups/$workspaceID/datasets/$($importedModel.id)/refreshes"
-                $status = Invoke-PowerBIRestMethod -Url $statusUri -Method GET | ConvertFrom-Json
-                
-                if ($status.value.Count -gt 0) {
-                    $latestStatus = $status.value[0].status
-                    Write-Host "Current Status: $latestStatus"
-                    
-                    switch ($latestStatus) {
-                        "Completed" {
-                            Write-Host "✓ Refresh completed successfully"
-                            $refreshComplete = $true
-                        }
-                        "Failed" {
-                            Write-Error "× Refresh failed"
-                            Write-Error "Error Details: $($status.value[0].errorMessage)"
-                            throw "Refresh failed"
-                        }
-                        "InProgress" {
-                            Write-Host "- Refresh still in progress..."
-                        }
-                        default {
-                            Write-Host "- Status: $latestStatus"
-                        }
-                    }
-                }
-            }
-
-            if (-not $refreshComplete) {
-                Write-Warning "! Refresh status check timed out"
-            }
-        }
-        catch {
-            Write-Error "× Refresh operation failed"
-            Write-Error "Error Type: $($_.Exception.GetType().Name)"
-            Write-Error "Error Message: $_"
-            if ($_.ErrorDetails) {
-                Write-Error "Additional Details: $($_.ErrorDetails.Message)"
-            }
-            if ($_.Exception.Response) {
-                Write-Error "Response Status: $($_.Exception.Response.StatusCode)"
-            }
-            throw
-        }
-
-        # 5. Final Status Check
-        Write-Host "`n5. FINAL STATUS CHECK:"
-        Write-Host "----------------------------------------"
-        try {
-            $finalCheckUri = "groups/$workspaceID/datasets/$($importedModel.id)"
-            $finalStatus = Invoke-PowerBIRestMethod -Url $finalCheckUri -Method GET | ConvertFrom-Json
-            Write-Host "Model Status: $($finalStatus.refreshState)"
-            Write-Host "Last Refresh: $($finalStatus.lastRefresh)"
-        }
-        catch {
-            Write-Warning "Final status check failed: $_"
-        }
-
-        Write-Host "`n=== Operation Summary ==="
-        Write-Host "----------------------------------------"
-        Write-Host "Authentication: Success"
-        Write-Host "Model Verification: Success"
-        Write-Host "Refresh Attempt: Complete"
-        Write-Host "Final Status: Verified"
+        Write-Host "SUCCESS: Refreshed => $($model.displayName) [ID=$($model.id)]"
     }
     catch {
-        Write-Error "`n!!! OPERATION FAILED !!!"
-        Write-Error "Final Error Details:"
-        Write-Error "- Type: $($_.Exception.GetType().Name)"
-        Write-Error "- Message: $_"
-        Write-Error "- Location: $($_.InvocationInfo.PositionMessage)"
-        Write-Warning "Continuing with deployment despite refresh failure"
+        Write-Error "ERROR: Failed to refresh => $($model.displayName) [ID=$($model.id)]. Details: $_"
+        throw
     }
 }
+
+Write-Host "All newly imported models have been refreshed."
