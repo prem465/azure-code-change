@@ -9411,26 +9411,48 @@ if ($modelFoldersMap.Count -gt 0) {
 if ($reportFoldersMap.Count -gt 0) {
     Write-Host "`n=== Importing Report-Only Changes ==="
     foreach ($base in $reportFoldersMap.Keys) {
-        try {  # Added try block
+        try {
             $rPath = $reportFoldersMap[$base]
             
-            # Get model ID - either from newly imported or existing
+            # Get semantic model ID
+            $modelId = $null
+            
+            # First try to get from newly imported models
             if ($modelIds.ContainsKey($base)) {
-                $smId = $modelIds[$base]
-                Write-Host "Using newly imported model ID: $smId for report: $rPath"
+                $modelId = $modelIds[$base]
+                Write-Host "Using newly imported model ID: $modelId"
             }
+            # If not found, search in workspace items
             else {
-                $smId = Fallback-ResolveSemanticModel $rPath $allItems
-                Write-Host "Using existing model ID: $smId for report: $rPath"
+                Write-Host "Searching for existing semantic model in workspace..."
+                $reportFolder = Split-Path $rPath -Parent
+                $reportName = Split-Path $reportFolder -Leaf
+                $baseName = $reportName -replace '\.Report$', ''
+                
+                # Look for semantic model with matching name
+                $semanticModel = $allItems | Where-Object { 
+                    $_.type -eq "SemanticModel" -and 
+                    ($_.displayName -eq $baseName -or 
+                     $_.displayName -eq "$baseName.SemanticModel" -or 
+                     $_.displayName -like "*$baseName*")
+                }
+
+                if ($semanticModel) {
+                    $modelId = $semanticModel.id
+                    Write-Host "Found existing semantic model: $($semanticModel.displayName) [Id: $modelId]"
+                }
+                else {
+                    throw "Could not find semantic model for report: $reportName"
+                }
             }
 
             # Import report with proper connection
             Write-Host "Importing report => $rPath"
             Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{
-                semanticModelId = $smId
+                semanticModelId = $modelId
                 datasetReference = @{
                     byConnection = @{
-                        modelId = $smId
+                        modelId = $modelId
                         connectionType = "pbiServiceXmlaStyleLive"
                         pbiModelVirtualServerName = "sobe_wowvirtualserver"
                     }
@@ -9438,7 +9460,7 @@ if ($reportFoldersMap.Count -gt 0) {
             }
             Write-Host "Report imported successfully"
         }
-        catch {  # Added catch block
+        catch {
             Write-Error "Error importing report: $_"
             throw
         }
