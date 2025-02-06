@@ -9342,3 +9342,87 @@ foreach ($model in $importedModels) {
 }
 
 Write-Host "All newly imported models have been refreshed."
+--------------------------------------------------------------------------------------------
+
+
+############################################################################
+# If both Model & Report are changed in the same commit
+############################################################################
+if ($bothBases.Count -gt 0) {
+    Write-Host "`n=== Both Model & Report changed in the same commit ==="
+    foreach ($b in $bothBases) {
+        $mFolder = $modelFoldersMap[$b]
+        $rFolder = $reportFoldersMap[$b]
+
+        # Import model first
+        Write-Host "Importing Model => $mFolder (base='$b')"
+        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
+        Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
+        $modelIds[$b] = $importedModel.id
+
+        # Then import report with explicit model connection
+        Write-Host "Importing Report => $rFolder (base='$b')"
+        Import-FabricItem -workspaceId $workspaceID -path $rFolder -itemProperties @{
+            semanticModelId = $importedModel.id
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $importedModel.id
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        }
+        Write-Host "Report imported successfully"
+
+        # Remove from maps so no fallback
+        $modelFoldersMap.Remove($b) | Out-Null
+        $reportFoldersMap.Remove($b) | Out-Null
+    }
+}
+
+############################################################################
+# Import Model-Only Changes
+############################################################################
+if ($modelFoldersMap.Count -gt 0) {
+    Write-Host "`n=== Importing Model-Only Changes ==="
+    foreach ($base in $modelFoldersMap.Keys) {
+        $folderPath = $modelFoldersMap[$base]
+        Write-Host "Importing Model => $folderPath"
+        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $folderPath
+        $modelIds[$base] = $importedModel.id
+    }
+}
+
+############################################################################
+# Import Report-Only Changes
+############################################################################
+if ($reportFoldersMap.Count -gt 0) {
+    Write-Host "`n=== Importing Report-Only Changes ==="
+    foreach ($base in $reportFoldersMap.Keys) {
+        $rPath = $reportFoldersMap[$base]
+        
+        # Get model ID - either from newly imported or existing
+        if ($modelIds.ContainsKey($base)) {
+            $smId = $modelIds[$base]
+            Write-Host "Using newly imported model ID: $smId for report: $rPath"
+        }
+        else {
+            $smId = Fallback-ResolveSemanticModel $rPath $allItems
+            Write-Host "Using existing model ID: $smId for report: $rPath"
+        }
+
+        # Import report with proper connection
+        Write-Host "Importing report => $rPath"
+        Import-FabricItem -workspaceId $workspaceID -path $rPath -itemProperties @{
+            semanticModelId = $smId
+            datasetReference = @{
+                byConnection = @{
+                    modelId = $smId
+                    connectionType = "pbiServiceXmlaStyleLive"
+                    pbiModelVirtualServerName = "sobe_wowvirtualserver"
+                }
+            }
+        }
+        Write-Host "Report imported successfully"
+    }
+}
