@@ -9345,17 +9345,24 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# ======================= Minimal Model Refresh (using $modelIds) =======================
-Write-Host "`n=== Refreshing Newly Imported Models ==="
+# ===================== Model Refresh + Credentials (OAuth2) =====================
 
-# $modelIds is a [string => string] dictionary
-#   Keys: base name
-#   Values: the newly imported model ID
+Write-Host "`n=== Refreshing Newly Imported Models with OAuth2 Credentials ==="
 
 foreach ($mdlId in $modelIds.Values) {
     try {
-        Write-Host "Refreshing => ID=$mdlId"
+        Write-Host "Configuring credentials for dataset => ID=$mdlId (OAuth2)..."
 
+        # Set or update the dataset credentials to use OAuth2 for Azure SQL
+        Set-PowerBIDatasetCredential `
+            -DatasetId $mdlId `
+            -CredentialType OAuth2 `
+            -PrivacyLevel Organizational
+
+        Write-Host "Credentials set for dataset => ID=$mdlId"
+
+        # Now that credentials exist, we can refresh
+        Write-Host "Refreshing => ID=$mdlId"
         Invoke-SemanticModelRefresh `
             -WorkspaceId $workspaceID `
             -SemanticModelId $mdlId `
@@ -9367,10 +9374,10 @@ foreach ($mdlId in $modelIds.Values) {
         Write-Host "SUCCESS: Refreshed => $mdlId"
     }
     catch {
-        Write-Error "ERROR: Failed to refresh => ID=$mdlId. $_"
+        Write-Error "ERROR: Failed to credential or refresh => ID=$mdlId. Details: $_"
         throw
     }
 }
 
-Write-Host "All newly imported models have been refreshed."
-# ======================= End of Refresh Snippet =======================
+Write-Host "All newly imported models have credentials and are refreshed."
+# ===================== End of Snippet =====================
