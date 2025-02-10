@@ -9346,27 +9346,34 @@ Write-Host "All newly imported models have been refreshed."
 
 
 
-# ====================== FIX for "Unexpected token 'accessToken'" in PowerShell ======================
-param(
-    [string] $workspaceId,
-    [string] $modelId,
-    [string] $serverName = "lv-prod-sql.database.windows.net",
-    [string] $databaseName = "LAKEVIEWCOLLATERAL"
-)
+# ====================== AFTER MODEL + REPORT IMPORT SNIPPET ======================
+# Prerequisite:
+#   $workspaceId  : The workspace GUID you used for import
+#   $importedModel: The newly imported model object (with $importedModel.id as the dataset ID)
+#   $clientId, $clientSecret, $tenantId : Strings for your Azure AD app
+#   Already have MicrosoftPowerBIMgmt & FabricPS-PBIP modules imported
 
-Write-Host "`n=== Starting Semantic Model Refresh with OAuth2 Credentials (No parse errors) ==="
+Write-Host "`n=== Setting Credentials & Refreshing Newly Imported Model ==="
+
+# 1) Hard-code or retrieve from env
+$serverName   = "lv-prod-sql.database.windows.net"
+$databaseName = "LAKEVIEWCOLLATERAL"
+
+if (-not $workspaceId)      { throw "Missing $workspaceId from earlier import code." }
+if (-not $importedModel)    { throw "Missing $importedModel from earlier import code." }
+if (-not $importedModel.id) { throw "No ID in $importedModel. Check Import-FabricItem result." }
+
+# Ensure your client credentials are set
+$clientId     = $env:CLIENT_ID
+$clientSecret = $env:CLIENT_SECRET
+$tenantId     = $env:TENANT_ID
+if (-not $clientId -or -not $clientSecret -or -not $tenantId) {
+    throw "Missing CLIENT_ID, CLIENT_SECRET, or TENANT_ID environment variables."
+}
 
 try {
-    # 1) Gather client credentials from environment
-    $clientId     = $env:CLIENT_ID
-    $clientSecret = $env:CLIENT_SECRET
-    $tenantId     = $env:TENANT_ID
-
-    if (-not $clientId -or -not $clientSecret -or -not $tenantId) {
-        throw "Missing CLIENT_ID, CLIENT_SECRET, or TENANT_ID environment variables."
-    }
-
-    # 2) Obtain an OAuth2 token from Azure AD
+    # 2) Request an OAuth2 token for Azure SQL
+    Write-Host "Requesting Azure SQL token via client credentials..."
     $tokenUrl = "https://login.microsoftonline.com/$tenantId/oauth2/token"
     $body = @{
         grant_type    = "client_credentials"
@@ -9374,35 +9381,32 @@ try {
         client_secret = $clientSecret
         resource      = "https://database.windows.net/"
     }
-
-    Write-Host "Requesting token for Azure SQL..."
     $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $body
     $accessToken   = $tokenResponse.access_token
     if (-not $accessToken) {
         throw "No access token returned. Check app perms or credentials."
     }
-    Write-Host "Received Azure SQL token. Length=$($accessToken.Length)."
+    Write-Host "Received Azure SQL token. Length=$($accessToken.Length)"
 
-    # 3) Retrieve the dataset's data sources
-    Write-Host "Retrieving data source ID => dataset=$modelId"
-    $dsUrl  = "groups/$workspaceId/datasets/$modelId/datasources"
+    # 3) Retrieve the data source in the newly imported dataset
+    $dsUrl  = "groups/$workspaceId/datasets/$($importedModel.id)/datasources"
+    Write-Host "Retrieving data source for dataset => ID=$($importedModel.id)"
     $dsResp = Invoke-PowerBIRestMethod -Url $dsUrl -Method GET
-    if (-not $dsResp.value) { throw "No datasources found in dataset ID=$modelId" }
+    if (-not $dsResp.value) {
+        throw "No datasources found for dataset ID=$($importedModel.id)"
+    }
 
     $datasourceId = ($dsResp.value | Where-Object { $_.connectionDetails.server -eq $serverName }).id
     if (-not $datasourceId) {
-        throw "Could not find a datasource for $serverName in dataset=$modelId."
+        throw "Could not find a datasource with server=$serverName in dataset=$($importedModel.id)."
     }
     Write-Host "Found datasourceId=$datasourceId for server=$serverName"
 
-    # 4) Construct the 'credentials' property as a PowerShell object and convert it to JSON
-    #    This avoids "Unexpected token 'accessToken'" parse errors
-    $credsObj = @{
-        accessToken = $accessToken
-    }
-    $credsJson = $credsObj | ConvertTo-Json -Compress  # e.g. {"accessToken":"<the_token>"}
+    # 4) Build the JSON to update credentials (no parse error)
+    #    We'll create a hashtable for 'accessToken' and convert it to JSON
+    $credsObj  = @{ accessToken = $accessToken }
+    $credsJson = $credsObj | ConvertTo-Json -Compress  # -> {"accessToken":"<the_token>"}
 
-    # 5) Build the final updateDetails object
     $updateObj = @{
         updateDetails = @(
             @{
@@ -9423,29 +9427,30 @@ try {
             }
         )
     }
-
-    # Convert to JSON
     $updateBody = $updateObj | ConvertTo-Json -Depth 10
 
-    Write-Host "Updating datasource credentials => ID=$datasourceId"
-    $updUrl = "groups/$workspaceId/datasets/$modelId/Default.UpdateDatasources"
+    # POST /groups/{workspaceId}/datasets/{modelId}/Default.UpdateDatasources
+    $updUrl  = "groups/$workspaceId/datasets/$($importedModel.id)/Default.UpdateDatasources"
+    Write-Host "`nUpdating OAuth2 credentials => datasourceId=$datasourceId"
     $updResp = Invoke-PowerBIRestMethod -Url $updUrl -Method Post -Body $updateBody -ContentType "application/json"
     Write-Host "UpdateDatasources response => $($updResp | ConvertTo-Json)"
 
-    # 6) Finally, refresh the dataset
-    Write-Host "Refreshing dataset => $modelId"
+    # 5) Refresh the dataset
+    Write-Host "`nRefreshing newly imported model => $($importedModel.displayName) [ID=$($importedModel.id)]"
     Invoke-SemanticModelRefresh `
         -WorkspaceId $workspaceId `
-        -SemanticModelId $modelId `
+        -SemanticModelId $($importedModel.id) `
         -Credential (New-Object System.Management.Automation.PSCredential($clientId,($clientSecret | ConvertTo-SecureString -AsPlainText -Force))) `
         -TenantId $tenantId `
         -Environment Public `
         -LogOutput "ADO"
 
-    Write-Host "`nSUCCESS: Model ID=$modelId has been refreshed with OAuth2 credentials."
+    Write-Host "`nSUCCESS: Model '$($importedModel.displayName)' [ID=$($importedModel.id)] credentialed & refreshed."
 }
 catch {
     Write-Error "ERROR: $_"
     throw
 }
-# ======================= END CODE =======================
+
+Write-Host "`n=== Done Setting Credentials & Refreshing Model ==="
+# ================= END SNIPPET =================
