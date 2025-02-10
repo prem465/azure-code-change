@@ -9387,99 +9387,21 @@ if ($bothBases.Count -gt 0) {
 }
 
 ############################################################################
-# ============================ BOTH Model & Report Code + Refresh ============================
-# Assumptions:
-#  1) We have $bothBases: list of base names for changed .SemanticModel & .Report
-#  2) $modelFoldersMap, $reportFoldersMap: maps from base => folder path
-#  3) $workspaceID: the UAT workspace GUID
-#  4) $credential: PSCredential for your SPN
-#  5) $tenantId: e.g. $env:TENANT_ID
-#  6) We'll store new model objects in $importedModels for final refresh
 
-Write-Host "`n=== Both Model & Report changed in the same commit ==="
 
-foreach ($b in $bothBases) {
-    try {
-        $mFolder = $modelFoldersMap[$b]
-        $rFolder = $reportFoldersMap[$b]
+     
+# ====================== Minimal Semantic Model Refresh Snippet ====================== #
+Write-Host "`n=== Refreshing Newly Imported Models ==="
 
-        # 1) Import the Model
-        Write-Host "`nImporting Model => $mFolder (base='$b')"
-        $importedModel = Import-FabricItem -workspaceId $workspaceID -path $mFolder
-        if (-not $importedModel.id) {
-            throw "Import-FabricItem returned null for the model folder '$mFolder'."
-        }
-        Write-Host "Model imported => $($importedModel.displayName) [Id=$($importedModel.id)]"
-
-        # Keep track of the new model ID
-        $modelIds[$b] = $importedModel.id
-        $importedModels += $importedModel   # so we can do a final refresh later
-
-        # 2) Modify definition.pbir to remove 'byPath' & set 'byConnection'
-        # Using domain "northcentralus.pbidedicated.us" for Premium Per User capacity in North Central US
-        # Typically "Initial Catalog" = $importedModel.id,  pbiServiceModelId = $importedModel.id
-        Write-Host "Updating .pbir => $rFolder"
-        $definitionPath = Join-Path $rFolder "definition.pbir"
-        $definitionJson = Get-Content $definitionPath -Raw | ConvertFrom-Json
-
-        $definitionJson.datasetReference = @{
-            byConnection = @{
-                name                 = $importedModel.displayName
-                pbiServiceModelId    = $importedModel.id
-                pbiModelDatabaseName = $importedModel.id
-                connectionString     = "Provider=MSOLAP;Data Source=northcentralus.pbidedicated.us;Initial Catalog=$($importedModel.id)"
-                connectionType       = "pbiServiceXmlaStyleLive"
-            }
-            byPath = $null
-        }
-
-        # Save back the updated definition
-        $definitionJson | ConvertTo-Json -Depth 10 | Set-Content $definitionPath
-
-        # 3) Import the Report referencing the new semanticModelId
-        Write-Host "Importing Report => $rFolder with model ID=$($importedModel.id)"
-        Import-FabricItem -workspaceId $workspaceID `
-          -path $rFolder `
-          -itemProperties @{
-             semanticModelId = $importedModel.id
-             datasetReference = @{
-               byConnection = @{
-                 pbiServiceModelId    = $importedModel.id
-                 pbiModelDatabaseName = $importedModel.id
-                 connectionString     = "Provider=MSOLAP;Data Source=northcentralus.pbidedicated.us;Initial Catalog=$($importedModel.id)"
-                 connectionType       = "pbiServiceXmlaStyleLive"
-               }
-               byPath = $null
-             }
-           } | Out-Null
-
-        Write-Host "Report imported => base='$b', connected to modelId=$($importedModel.id)"
-
-        # Remove from the map so we don't process again
-        $modelFoldersMap.Remove($b) | Out-Null
-        $reportFoldersMap.Remove($b) | Out-Null
-
-        # Refresh items if desired
-        $allItems = Invoke-FabricAPIRequest -Uri "workspaces/$workspaceID/items" -Method GET
-    }
-    catch {
-        Write-Error "ERROR in both (model+report) import for base '$b'. Details: $_"
-        throw
-    }
-}
-
-Write-Host "`n=== Done handling Both scenario (Model & Report) ==="
-
-# ======================= OPTIONAL: REFRESH the newly imported models =======================
-Write-Host "`n=== Refreshing Imported Semantic Models... ==="
 foreach ($model in $importedModels) {
     try {
         Write-Host "Refreshing => $($model.displayName) [ID=$($model.id)]"
+
         Invoke-SemanticModelRefresh `
             -WorkspaceId $workspaceID `
             -SemanticModelId $model.id `
             -Credential $credential `
-            -TenantId $tenantId `
+            -TenantId $env:TENANT_ID `
             -Environment Public `
             -LogOutput "ADO"
 
@@ -9490,4 +9412,7 @@ foreach ($model in $importedModels) {
         throw
     }
 }
+
 Write-Host "All newly imported models have been refreshed."
+# ====================== End of Refresh Snippet ====================== #
+
