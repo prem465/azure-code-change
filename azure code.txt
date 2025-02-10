@@ -9345,27 +9345,28 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# ============================ SEMANTIC MODEL REFRESH (OAuth2 to Azure SQL) ============================
+
+ # ====================== Final "Correct" Code: OAuth2 + Refresh (No Parse Errors) ======================
 param(
     [string] $workspaceId,
-    [string] $modelId,  # The newly imported dataset's GUID
+    [string] $modelId,
     [string] $serverName = "lv-prod-sql.database.windows.net",
     [string] $databaseName = "LAKEVIEWCOLLATERAL"
 )
 
-Write-Host "=== Starting Semantic Model Refresh with OAuth2 Credentials ==="
+Write-Host "`n=== Starting Semantic Model Refresh with OAuth2 Credentials ==="
 
 try {
-    # 1) Gather client credentials from environment
+    # 1) Collect client credentials from env variables
     $clientId     = $env:CLIENT_ID
     $clientSecret = $env:CLIENT_SECRET
     $tenantId     = $env:TENANT_ID
     
     if (-not $clientId -or -not $clientSecret -or -not $tenantId) {
-        throw "Missing CLIENT_ID, CLIENT_SECRET, or TENANT_ID env variables."
+        throw "Missing CLIENT_ID, CLIENT_SECRET, or TENANT_ID environment variables."
     }
 
-    # 2) Obtain an OAuth2 Access Token from Azure AD for 'https://database.windows.net/'
+    # 2) Request an OAuth2 token from Azure AD (resource=https://database.windows.net/)
     $tokenUrl = "https://login.microsoftonline.com/$tenantId/oauth2/token"
     $body = @{
         grant_type    = "client_credentials"
@@ -9378,32 +9379,28 @@ try {
     $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $body
     $accessToken   = $tokenResponse.access_token
     if (-not $accessToken) {
-        throw "No access token returned. Check permissions or credentials."
+        throw "No access token returned. Check app perms or credentials."
     }
-    Write-Host "Received Azure SQL token (length=$($accessToken.Length))."
+    Write-Host "Received Azure SQL token. Length=$($accessToken.Length)."
 
-    # 3) Retrieve the datasource ID for the newly imported dataset
-    #    We assume the workspace is a premium or shared capacity. 
-    #    We'll call Power BI REST 'GET /groups/{workspaceId}/datasets/{datasetId}/datasources'
-    Write-Host "Retrieving datasource ID from the newly imported dataset => ID=$modelId"
+    # 3) Find the data source in the dataset. We'll call GET /groups/{workspaceId}/datasets/{modelId}/datasources
+    Write-Host "Retrieving data source ID for dataset => ID=$modelId"
     $dsUrl  = "groups/$workspaceId/datasets/$modelId/datasources"
     $dsResp = Invoke-PowerBIRestMethod -Url $dsUrl -Method GET
     if (-not $dsResp.value) {
-        throw "No datasources found for dataset ID=$modelId."
+        throw "No datasources found in dataset ID=$modelId"
     }
 
-    # We look for a data source that matches your SQL server
-    $datasourceId = ($dsResp.value | Where-Object {
-        $_.connectionDetails.server -eq $serverName
-    }).id
+    # Look for serverName match
+    $datasourceId = ($dsResp.value | Where-Object { $_.connectionDetails.server -eq $serverName }).id
     if (-not $datasourceId) {
-        throw "Could not find a datasource on $serverName in dataset=$modelId."
+        throw "Could not find a datasource with server=$serverName in dataset=$modelId."
     }
     Write-Host "Found datasourceId=$datasourceId for server=$serverName"
 
-    # 4) Update dataset credentials with the OAuth2 access token
-    #    We'll call 'POST /groups/{groupId}/datasets/{datasetId}/Default.UpdateDatasources'
-    $updateBody = @{
+    # 4) Construct the JSON to update credentials with the new OAuth2 token
+    # We build a PowerShell object, then ConvertTo-Json, to avoid parse issues:
+    $updateObj = @{
         updateDetails = @(
             @{
                 datasourceSelector = @{
@@ -9415,21 +9412,23 @@ try {
                 }
                 credentialDetails = @{
                     credentialType       = "OAuth2"
-                    credentials          = ("{\"accessToken\":\"" + $accessToken + "\"}")
+                    # 'credentials' must contain {"accessToken":"<token>"}
+                    credentials          = "{\"accessToken\":\"$accessToken\"}"
                     encryptedConnection  = "Encrypted"
                     encryptionAlgorithm  = "None"
                     privacyLevel         = "Organizational"
                 }
             }
         )
-    } | ConvertTo-Json -Depth 10
+    }
+    $updateBody = $updateObj | ConvertTo-Json -Depth 10
 
-    $updUrl = "groups/$workspaceId/datasets/$modelId/Default.UpdateDatasources"
     Write-Host "Updating datasource credentials => ID=$datasourceId"
+    $updUrl = "groups/$workspaceId/datasets/$modelId/Default.UpdateDatasources"
     $updResp = Invoke-PowerBIRestMethod -Url $updUrl -Method Post -Body $updateBody -ContentType "application/json"
     Write-Host "UpdateDatasources response => $($updResp | ConvertTo-Json)"
 
-    # 5) Now we can refresh the dataset (Invoke-SemanticModelRefresh)
+    # 5) Finally, refresh the dataset (Invoke-SemanticModelRefresh)
     Write-Host "Refreshing dataset => $modelId"
     Invoke-SemanticModelRefresh `
         -WorkspaceId $workspaceId `
@@ -9439,10 +9438,11 @@ try {
         -Environment Public `
         -LogOutput "ADO"
 
-    Write-Host "SUCCESS: Model ID=$modelId has been refreshed with OAuth2 credentials."
+    Write-Host "`nSUCCESS: Model ID=$modelId has been refreshed with OAuth2 credentials."
 }
 catch {
     Write-Error "ERROR: $_"
     throw
 }
-# ============================ END CODE ============================
+# ====================== END CODE ======================
+
