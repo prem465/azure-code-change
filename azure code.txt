@@ -9346,7 +9346,7 @@ Write-Host "All newly imported models have been refreshed."
 
 
 
- # ====================== Final "Correct" Code: OAuth2 + Refresh (No Parse Errors) ======================
+# ====================== FIX for "Unexpected token 'accessToken'" in PowerShell ======================
 param(
     [string] $workspaceId,
     [string] $modelId,
@@ -9354,19 +9354,19 @@ param(
     [string] $databaseName = "LAKEVIEWCOLLATERAL"
 )
 
-Write-Host "`n=== Starting Semantic Model Refresh with OAuth2 Credentials ==="
+Write-Host "`n=== Starting Semantic Model Refresh with OAuth2 Credentials (No parse errors) ==="
 
 try {
-    # 1) Collect client credentials from env variables
+    # 1) Gather client credentials from environment
     $clientId     = $env:CLIENT_ID
     $clientSecret = $env:CLIENT_SECRET
     $tenantId     = $env:TENANT_ID
-    
+
     if (-not $clientId -or -not $clientSecret -or -not $tenantId) {
         throw "Missing CLIENT_ID, CLIENT_SECRET, or TENANT_ID environment variables."
     }
 
-    # 2) Request an OAuth2 token from Azure AD (resource=https://database.windows.net/)
+    # 2) Obtain an OAuth2 token from Azure AD
     $tokenUrl = "https://login.microsoftonline.com/$tenantId/oauth2/token"
     $body = @{
         grant_type    = "client_credentials"
@@ -9383,23 +9383,26 @@ try {
     }
     Write-Host "Received Azure SQL token. Length=$($accessToken.Length)."
 
-    # 3) Find the data source in the dataset. We'll call GET /groups/{workspaceId}/datasets/{modelId}/datasources
-    Write-Host "Retrieving data source ID for dataset => ID=$modelId"
+    # 3) Retrieve the dataset's data sources
+    Write-Host "Retrieving data source ID => dataset=$modelId"
     $dsUrl  = "groups/$workspaceId/datasets/$modelId/datasources"
     $dsResp = Invoke-PowerBIRestMethod -Url $dsUrl -Method GET
-    if (-not $dsResp.value) {
-        throw "No datasources found in dataset ID=$modelId"
-    }
+    if (-not $dsResp.value) { throw "No datasources found in dataset ID=$modelId" }
 
-    # Look for serverName match
     $datasourceId = ($dsResp.value | Where-Object { $_.connectionDetails.server -eq $serverName }).id
     if (-not $datasourceId) {
-        throw "Could not find a datasource with server=$serverName in dataset=$modelId."
+        throw "Could not find a datasource for $serverName in dataset=$modelId."
     }
     Write-Host "Found datasourceId=$datasourceId for server=$serverName"
 
-    # 4) Construct the JSON to update credentials with the new OAuth2 token
-    # We build a PowerShell object, then ConvertTo-Json, to avoid parse issues:
+    # 4) Construct the 'credentials' property as a PowerShell object and convert it to JSON
+    #    This avoids "Unexpected token 'accessToken'" parse errors
+    $credsObj = @{
+        accessToken = $accessToken
+    }
+    $credsJson = $credsObj | ConvertTo-Json -Compress  # e.g. {"accessToken":"<the_token>"}
+
+    # 5) Build the final updateDetails object
     $updateObj = @{
         updateDetails = @(
             @{
@@ -9412,8 +9415,7 @@ try {
                 }
                 credentialDetails = @{
                     credentialType       = "OAuth2"
-                    # 'credentials' must contain {"accessToken":"<token>"}
-                    credentials          = "{\"accessToken\":\"$accessToken\"}"
+                    credentials          = $credsJson
                     encryptedConnection  = "Encrypted"
                     encryptionAlgorithm  = "None"
                     privacyLevel         = "Organizational"
@@ -9421,6 +9423,8 @@ try {
             }
         )
     }
+
+    # Convert to JSON
     $updateBody = $updateObj | ConvertTo-Json -Depth 10
 
     Write-Host "Updating datasource credentials => ID=$datasourceId"
@@ -9428,7 +9432,7 @@ try {
     $updResp = Invoke-PowerBIRestMethod -Url $updUrl -Method Post -Body $updateBody -ContentType "application/json"
     Write-Host "UpdateDatasources response => $($updResp | ConvertTo-Json)"
 
-    # 5) Finally, refresh the dataset (Invoke-SemanticModelRefresh)
+    # 6) Finally, refresh the dataset
     Write-Host "Refreshing dataset => $modelId"
     Invoke-SemanticModelRefresh `
         -WorkspaceId $workspaceId `
@@ -9444,5 +9448,4 @@ catch {
     Write-Error "ERROR: $_"
     throw
 }
-# ====================== END CODE ======================
-
+# ======================= END CODE =======================
