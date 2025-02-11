@@ -9345,18 +9345,15 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# Comprehensive debug-enhanced semantic model refresh script
-# This script includes detailed permission checking and debugging
+# Enhanced script with service principal permission handling
+Write-Host "`n=== Starting Enhanced Semantic Model Refresh ==="
 
-Write-Host "`n=== Starting Debug-Enhanced Semantic Model Refresh ==="
-
-function Write-DebugLog {
+function Write-Log {
     param(
         [string]$Message,
-        [string]$Level = "INFO",
-        [object]$DebugData = $null
+        [string]$Level = "INFO"
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     $color = switch ($Level) {
         "INFO" { "White" }
         "ERROR" { "Red" }
@@ -9366,230 +9363,172 @@ function Write-DebugLog {
         default { "Gray" }
     }
     Write-Host "[$timestamp] $Level : $Message" -ForegroundColor $color
-    
-    if ($DebugData) {
-        Write-Host "Debug Data:" -ForegroundColor Cyan
-        $DebugData | ConvertTo-Json -Depth 10 | Write-Host
-    }
 }
 
-# Permission checking functions
-function Test-PowerBIWorkspaceAccess {
-    param($WorkspaceId)
-    Write-DebugLog "Testing Power BI Workspace Access..." -Level "DEBUG"
+function Test-WorkspaceAccess {
+    param (
+        [string]$WorkspaceId,
+        [int]$RetryCount = 3,
+        [int]$RetryDelay = 10
+    )
     
-    try {
-        # Get workspace details
-        $workspace = Get-PowerBIWorkspace -Id $WorkspaceId
-        
-        # Check workspace access level
-        $accessDetails = @{
-            WorkspaceName = $workspace.Name
-            AccessLevel = $workspace.Type
-            IsAdmin = $false
-            UserAccess = $null
+    for ($i = 1; $i -le $RetryCount; $i++) {
+        try {
+            Write-Log "Attempt $i of $RetryCount to verify workspace access..."
+            
+            # Get current identity information
+            $identity = Invoke-PowerBIRestMethod -Url "groups/$WorkspaceId/users" -Method GET | ConvertFrom-Json
+            $currentUser = $identity.value | Where-Object { $_.identifier -eq $env:CLIENT_ID }
+            
+            if ($currentUser) {
+                Write-Log "Found user in workspace with role: $($currentUser.groupUserAccessRight)" -Level "DEBUG"
+                return $true
+            }
+            
+            Write-Log "Service Principal not found in workspace users list. Waiting $RetryDelay seconds..." -Level "WARNING"
+            Start-Sleep -Seconds $RetryDelay
         }
-
-        # Get workspace users to check role
-        $usersUrl = "groups/$WorkspaceId/users"
-        $users = Invoke-PowerBIRestMethod -Url $usersUrl -Method GET | ConvertFrom-Json
-        $currentUser = $users.value | Where-Object { $_.identifier -eq $env:CLIENT_ID }
-        
-        if ($currentUser) {
-            $accessDetails.UserAccess = $currentUser.groupUserAccessRight
-            $accessDetails.IsAdmin = $currentUser.groupUserAccessRight -eq "Admin"
+        catch {
+            Write-Log "Error checking workspace access: $_" -Level "WARNING"
+            if ($i -lt $RetryCount) {
+                Start-Sleep -Seconds $RetryDelay
+            }
         }
-
-        Write-DebugLog "Workspace access details" -Level "DEBUG" -DebugData $accessDetails
-        
-        if (-not $accessDetails.IsAdmin) {
-            throw "Service Principal needs Admin access to workspace. Current role: $($accessDetails.UserAccess)"
-        }
-        
-        return $true
     }
-    catch {
-        Write-DebugLog "Workspace access check failed" -Level "ERROR" -DebugData @{
-            Error = $_.Exception.Message
-            WorkspaceId = $WorkspaceId
-            ClientId = $env:CLIENT_ID
-        }
-        throw
-    }
+    return $false
 }
 
-function Test-SQLDatabaseAccess {
-    param($ServerName, $DatabaseName)
-    Write-DebugLog "Testing SQL Database Access..." -Level "DEBUG"
-    
-    try {
-        # Get SQL token
-        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
-        $tokenBody = @{
-            grant_type = "client_credentials"
-            client_id = $env:CLIENT_ID
-            client_secret = $env:CLIENT_SECRET
-            scope = "https://database.windows.net/.default"
-        }
-        $sqlToken = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
-        
-        # Test token validity
-        $tokenDebug = @{
-            TokenReceived = $null -ne $sqlToken.access_token
-            TokenType = $sqlToken.token_type
-            ExpiresIn = $sqlToken.expires_in
-            Scope = $sqlToken.scope
-        }
-        Write-DebugLog "SQL token details" -Level "DEBUG" -DebugData $tokenDebug
-        
-        return $true
-    }
-    catch {
-        Write-DebugLog "SQL access check failed" -Level "ERROR" -DebugData @{
-            Error = $_.Exception.Message
-            Server = $ServerName
-            Database = $DatabaseName
-            ClientId = $env:CLIENT_ID
-        }
-        throw
-    }
-}
-
-function Test-AzureADPermissions {
-    param()
-    Write-DebugLog "Testing Azure AD Permissions..." -Level "DEBUG"
-    
-    try {
-        # Get application details from Azure AD
-        $graphUrl = "https://graph.microsoft.com/v1.0/applications"
-        $graphToken = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token" -Method POST -Body @{
-            grant_type = "client_credentials"
-            client_id = $env:CLIENT_ID
-            client_secret = $env:CLIENT_SECRET
-            scope = "https://graph.microsoft.com/.default"
-        }
-        
-        $appDetails = Invoke-RestMethod -Uri $graphUrl -Headers @{
-            Authorization = "Bearer $($graphToken.access_token)"
-        }
-        
-        $permissionDebug = @{
-            ApplicationFound = $null -ne $appDetails
-            Permissions = $appDetails.value | Where-Object { $_.appId -eq $env:CLIENT_ID } | Select-Object -ExpandProperty requiredResourceAccess
-        }
-        Write-DebugLog "Azure AD permissions" -Level "DEBUG" -DebugData $permissionDebug
-        
-        return $true
-    }
-    catch {
-        Write-DebugLog "Azure AD permission check failed" -Level "ERROR" -DebugData @{
-            Error = $_.Exception.Message
-            ClientId = $env:CLIENT_ID
-            TenantId = $env:TENANT_ID
-        }
-        throw
-    }
-}
-
-# Main script execution
 try {
-    # Configuration
+    # Step 1: Initial Setup
+    Write-Log "Setting up refresh process..."
     $config = @{
         workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
-        sqlServer = "lv-prod-sql.database.windows.net"
-        database = "LAKEVIEWCOLLATERAL"
         timeoutMinutes = 15
     }
 
-    Write-DebugLog "Starting permission validation..." -Level "DEBUG"
-
-    # Step 1: Comprehensive Permission Checks
-    Write-DebugLog "Checking all required permissions..." -Level "INFO"
-    
-    # Check Power BI Workspace Access
-    try {
-        Test-PowerBIWorkspaceAccess -WorkspaceId $config.workspaceId
-        Write-DebugLog "Power BI workspace access verified" -Level "SUCCESS"
-    }
-    catch {
-        Write-DebugLog "Power BI workspace access check failed: $_" -Level "ERROR"
-        Write-DebugLog "Action Required: Please request 'Admin' role in Power BI workspace" -Level "ERROR"
-        throw
-    }
-
-    # Check SQL Database Access
-    try {
-        Test-SQLDatabaseAccess -ServerName $config.sqlServer -DatabaseName $config.database
-        Write-DebugLog "SQL database access verified" -Level "SUCCESS"
-    }
-    catch {
-        Write-DebugLog "SQL database access check failed: $_" -Level "ERROR"
-        Write-DebugLog "Action Required: Please request db_datareader role in SQL Database" -Level "ERROR"
-        throw
-    }
-
-    # Check Azure AD Permissions
-    try {
-        Test-AzureADPermissions
-        Write-DebugLog "Azure AD permissions verified" -Level "SUCCESS"
-    }
-    catch {
-        Write-DebugLog "Azure AD permission check failed: $_" -Level "ERROR"
-        Write-DebugLog "Action Required: Please check Azure AD app permissions" -Level "ERROR"
-        throw
-    }
-
-    # Step 2: Service Connection
-    Write-DebugLog "Connecting to Power BI Service..." -Level "DEBUG"
+    # Step 2: Primary Authentication
+    Write-Log "Authenticating service principal..."
     $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
     $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
-    Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
 
-    # Step 3: Dataset Operations with Debug Info
-    Write-DebugLog "Getting dataset details..." -Level "DEBUG"
+    # Disconnect existing sessions first
+    Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
+    
+    # Connect with explicit service principal flow
+    Connect-PowerBIServiceAccount -ServicePrincipal `
+                                -Credential $credential `
+                                -TenantId $env:TENANT_ID
+
+    # Step 3: Verify Workspace Access
+    Write-Log "Verifying workspace access..."
+    if (-not (Test-WorkspaceAccess -WorkspaceId $config.workspaceId)) {
+        throw "Service Principal requires Admin access to workspace. Please verify permissions."
+    }
+
+    # Step 4: Get Dataset Details
+    Write-Log "Getting dataset details..."
     $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
     $dataset = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
-    
-    Write-DebugLog "Dataset details" -Level "DEBUG" -DebugData @{
-        DatasetId = $dataset.id
-        Name = $dataset.name
-        ConfiguredBy = $dataset.configuredBy
+    Write-Log "Found dataset: $($dataset.name)"
+
+    # Step 5: Take Ownership with Retry
+    Write-Log "Taking ownership of dataset..."
+    $ownershipSuccess = $false
+    $retryCount = 3
+
+    for ($i = 1; $i -le $retryCount; $i++) {
+        try {
+            $takeoverUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.TakeOver"
+            Invoke-PowerBIRestMethod -Url $takeoverUrl -Method POST
+            $ownershipSuccess = $true
+            Write-Log "Successfully took ownership of dataset" -Level "SUCCESS"
+            break
+        }
+        catch {
+            Write-Log "Attempt $i of $retryCount to take ownership failed: $_" -Level "WARNING"
+            if ($i -lt $retryCount) {
+                Start-Sleep -Seconds 10
+            }
+        }
     }
 
-    # Rest of your refresh code here...
-    # [Previous refresh implementation continues...]
+    if (-not $ownershipSuccess) {
+        Write-Log "Continuing without ownership transfer..." -Level "WARNING"
+    }
 
+    # Step 6: Update Credentials
+    Write-Log "Updating dataset credentials..."
+    $credentialBody = @{
+        credentialDetails = @{
+            credentialType = "OAuth2"
+            credential = @{
+                AuthenticationKind = "ServicePrincipal"
+                ClientId = $env:CLIENT_ID
+                TenantId = $env:TENANT_ID
+            }
+            privacyLevel = "Organizational"
+            encryptedConnection = "Encrypted"
+        }
+    }
+
+    $credentialUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetCredentials"
+    Invoke-PowerBIRestMethod -Url $credentialUrl -Method POST -Body ($credentialBody | ConvertTo-Json -Depth 10)
+    Write-Log "Credentials updated successfully"
+
+    # Step 7: Trigger Refresh
+    Write-Log "Initiating dataset refresh..."
+    $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
+    $refreshBody = @{
+        type = "Full"
+        commitMode = "transactional"
+        maxParallelism = 10
+        objects = @(@{ table = "*" })
+    }
+
+    Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
+    Write-Log "Refresh triggered successfully"
+
+    # Step 8: Monitor Refresh
+    Write-Log "Monitoring refresh status..."
+    $startTime = Get-Date
+    $refreshComplete = $false
+
+    while (-not $refreshComplete) {
+        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.timeoutMinutes)) {
+            throw "Refresh operation timed out after $($config.timeoutMinutes) minutes"
+        }
+
+        Start-Sleep -Seconds 30
+        $statusUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
+        $status = (Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json).value[0].status
+        Write-Log "Current refresh status: $status"
+
+        if ($status -eq "Completed") {
+            $refreshComplete = $true
+            Write-Log "Refresh completed successfully" -Level "SUCCESS"
+        }
+        elseif ($status -eq "Failed") {
+            throw "Refresh failed. Check Power BI Service for details."
+        }
+    }
 }
 catch {
-    $errorDetails = @{
-        Message = $_.Exception.Message
-        ScriptStackTrace = $_.ScriptStackTrace
-        FullError = $_
-    }
-    Write-DebugLog "Critical error in refresh process" -Level "ERROR" -DebugData $errorDetails
+    Write-Log "Error in refresh process: $_" -Level "ERROR"
     
-    # Provide guidance based on error type
-    switch -Regex ($_.Exception.Message) {
-        ".*403.*" {
-            Write-DebugLog "Permission Error Detected" -Level "ERROR"
-            Write-DebugLog "Required Permissions:" -Level "ERROR"
-            Write-DebugLog "1. Power BI Workspace: Admin role" -Level "ERROR"
-            Write-DebugLog "2. SQL Database: db_datareader role" -Level "ERROR"
-            Write-DebugLog "3. Azure AD: Power BI Service app permissions" -Level "ERROR"
-        }
-        ".*401.*" {
-            Write-DebugLog "Authentication Error Detected" -Level "ERROR"
-            Write-DebugLog "Please verify service principal credentials and tenant ID" -Level "ERROR"
-        }
-        default {
-            Write-DebugLog "Unknown Error - Please contact support with the error details above" -Level "ERROR"
-        }
+    # Enhanced error reporting
+    if ($_.Exception.Message -like "*403*" -or $_.Exception.Message -like "*Forbidden*") {
+        Write-Log "Permission Error Detected!" -Level "ERROR"
+        Write-Log "Please verify the following:" -Level "ERROR"
+        Write-Log "1. Service Principal (lv-powerbi) has Admin role in workspace" -Level "ERROR"
+        Write-Log "2. Service Principal has Tenant.ReadWrite.All permission" -Level "ERROR"
+        Write-Log "3. Wait a few minutes for permission propagation" -Level "ERROR"
     }
+    
     throw
 }
 finally {
-    Write-DebugLog "Cleaning up connections..." -Level "INFO"
+    Write-Log "Cleaning up..."
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
 }
 
-Write-DebugLog "=== Debug-Enhanced Refresh Process Complete ==="
+Write-Log "=== Refresh Process Complete ==="
