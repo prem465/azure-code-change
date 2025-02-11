@@ -9344,20 +9344,21 @@ foreach ($model in $importedModels) {
 Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
-Write-Host "`n=== Setting Credentials & Refreshing Newly Imported Model ==="
+Write-Host "`n=== Setting Credentials, Refreshing Model & Updating Ownership ==="
 
-# We assume:
-#   $workspaceId    : The workspace GUID
-#   $importedModel  : object from Import-FabricItem (has .id)
+# We assume these variables are set:
+#   $workspaceId      : The workspace GUID
+#   $importedModel    : object from Import-FabricItem (has .id)
 #   $clientId, $clientSecret, $tenantId set in env
-#   $serverName     = "lv-prod-sql.database.windows.net"
-#   $databaseName   = "LAKEVIEWCOLLATERAL"
+#   $serverName       = "lv-prod-sql.database.windows.net"
+#   $databaseName     = "LAKEVIEWCOLLATERAL"
 
 if (-not $workspaceId)      { throw "Missing $workspaceId from earlier import code." }
 if (-not $importedModel)    { throw "Missing $importedModel from earlier import code." }
 if (-not $importedModel.id) { throw "No ID in $importedModel. Check Import-FabricItem result." }
 
 try {
+    # 1. Get Azure SQL Token for Data Source Authentication
     Write-Host "`nRequesting Azure SQL token..."
     $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/token"
     $body = @{
@@ -9369,77 +9370,124 @@ try {
     $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $body
     $accessToken   = $tokenResponse.access_token
     if (-not $accessToken) {
-        throw "No access token returned. Check app perms or credentials."
+        throw "No access token returned. Check app permissions or credentials."
     }
     Write-Host "Received Azure SQL token. Length=$($accessToken.Length)"
 
-    # 1) Get the dataset’s data sources
-    $dsUrl  = "groups/$workspaceId/datasets/$($importedModel.id)/datasources"
+    # 2. Get Dataset's Data Sources
+    $dsUrl = "groups/$workspaceId/datasets/$($importedModel.id)/datasources"
     Write-Host "`nRetrieving data sources => dataset ID=$($importedModel.id)"
     $dsResp = Invoke-PowerBIRestMethod -Url $dsUrl -Method GET
+    
+    if (-not $dsResp) {
+        throw "No response from datasources API for dataset ID=$($importedModel.id)"
+    }
+    $datasources = $dsResp | ConvertFrom-Json
 
-    if (-not $dsResp.value) {
-        throw "No datasources found for dataset ID=$($importedModel.id). Possibly the model has no data source?"
+    if (-not $datasources.value) {
+        throw "No datasources found for dataset ID=$($importedModel.id)"
     }
 
-    Write-Host "`n=== Listing all data source servers in this dataset for debugging ==="
-    foreach ($ds in $dsResp.value) {
-        $srv = $ds.connectionDetails.server
-        $db  = $ds.connectionDetails.database
-        Write-Host "DatasourceId=$($ds.id) => server='$srv', database='$db'"
-    }
+    # 3. Update Credentials for Each Data Source
+    foreach ($ds in $datasources.value) {
+        $datasourceId = $ds.id
+        Write-Host "`nUpdating credentials for datasource ID=$datasourceId"
 
-    # 2) Try to find the matching server
-    $datasourceId = ($dsResp.value | Where-Object { $_.connectionDetails.server -eq $serverName }).id
-    if (-not $datasourceId) {
-        throw "Could NOT find a data source with server='$serverName' in dataset=$($importedModel.id). Check logs above for actual server names."
-    }
-    Write-Host "`nFound matching datasourceId=$datasourceId for server=$serverName"
-
-    # 3) Build credential JSON
-    $credsObj  = @{ accessToken = $accessToken }
-    $credsJson = $credsObj | ConvertTo-Json -Compress
-
-    $updateObj = @{
-        updateDetails = @(
-            @{
-                datasourceSelector = @{ datasourceId = $datasourceId }
-                connectionDetails = @{
-                    server   = $serverName
-                    database = $databaseName
+        # Prepare credential update payload
+        $updateObj = @{
+            updateDetails = @(
+                @{
+                    datasourceSelector = @{
+                        datasourceId = $datasourceId
+                    }
+                    connectionDetails = @{
+                        server   = $serverName
+                        database = $databaseName
+                    }
+                    credentialDetails = @{
+                        credentialType       = "OAuth2"
+                        credentials         = @{ accessToken = $accessToken } | ConvertTo-Json
+                        encryptedConnection = "Encrypted"
+                        privacyLevel       = "Organizational"
+                    }
                 }
-                credentialDetails = @{
-                    credentialType       = "OAuth2"
-                    credentials          = $credsJson
-                    encryptedConnection  = "Encrypted"
-                    encryptionAlgorithm  = "None"
-                    privacyLevel         = "Organizational"
-                }
-            }
-        )
+            )
+        }
+        $updateBody = $updateObj | ConvertTo-Json -Depth 10
+
+        # Update the credentials
+        $updUrl = "groups/$workspaceId/datasets/$($importedModel.id)/Default.UpdateDatasources"
+        Write-Host "Updating OAuth2 credentials..."
+        $updResp = Invoke-PowerBIRestMethod -Url $updUrl -Method Post -Body $updateBody -ContentType "application/json"
+        Write-Host "Credential update response: $updResp"
     }
-    $updateBody = $updateObj | ConvertTo-Json -Depth 10
 
-    $updUrl  = "groups/$workspaceId/datasets/$($importedModel.id)/Default.UpdateDatasources"
-    Write-Host "`nUpdating OAuth2 credentials => datasourceId=$datasourceId"
-    $updResp = Invoke-PowerBIRestMethod -Url $updUrl -Method Post -Body $updateBody -ContentType "application/json"
-    Write-Host "UpdateDatasources response => $($updResp | ConvertTo-Json)"
+    # 4. Trigger Refresh Using Direct API Call
+    Write-Host "`nInitiating refresh for model '$($importedModel.displayName)' [ID=$($importedModel.id)]"
+    $refreshUrl = "groups/$workspaceId/datasets/$($importedModel.id)/refreshes"
+    $refreshBody = @{
+        type        = "Full"
+        commitMode  = "transactional"
+        maxParallelism = 10
+        retryCount  = 2
+    } | ConvertTo-Json
 
-    # 4) Refresh
-    Write-Host "`nRefreshing => Model '$($importedModel.displayName)' [ID=$($importedModel.id)]"
-    Invoke-SemanticModelRefresh `
-        -WorkspaceId $workspaceId `
-        -SemanticModelId $($importedModel.id) `
-        -Credential (New-Object System.Management.Automation.PSCredential($env:CLIENT_ID,($env:CLIENT_SECRET | ConvertTo-SecureString -AsPlainText -Force))) `
-        -TenantId $env:TENANT_ID `
-        -Environment Public `
-        -LogOutput "ADO"
+    $refreshResponse = Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body $refreshBody
+    Write-Host "Refresh initiated. Response: $refreshResponse"
 
-    Write-Host "`nSUCCESS: Model '$($importedModel.displayName)' [ID=$($importedModel.id)] is credentialed & refreshed."
+    # 5. Monitor Refresh Status
+    $attempt = 0
+    $maxAttempts = 30  # 15 minutes timeout (30 * 30 seconds)
+    $refreshComplete = $false
+
+    do {
+        Start-Sleep -Seconds 30
+        $statusUrl = "groups/$workspaceId/datasets/$($importedModel.id)/refreshes?`$top=1"
+        $statusResponse = Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json
+        $status = $statusResponse.value[0].status
+
+        Write-Host "Refresh status: $status"
+        
+        if ($status -eq "Completed") {
+            $refreshComplete = $true
+            break
+        }
+        elseif ($status -eq "Failed") {
+            throw "Refresh failed. Check Power BI Service for details."
+        }
+
+        $attempt++
+    } while ($attempt -lt $maxAttempts)
+
+    if (-not $refreshComplete) {
+        throw "Refresh did not complete within timeout period."
+    }
+
+    # 6. Transfer Ownership of Model and Related Reports
+    Write-Host "`nTransferring ownership of semantic model and reports..."
+    
+    # Get all reports in workspace that use this semantic model
+    $reportsUrl = "groups/$workspaceId/reports"
+    $reports = (Invoke-PowerBIRestMethod -Url $reportsUrl -Method GET | ConvertFrom-Json).value
+    $relatedReports = $reports | Where-Object { $_.datasetId -eq $importedModel.id }
+
+    # Update model ownership
+    $modelOwnershipUrl = "groups/$workspaceId/datasets/$($importedModel.id)/Default.TakeOver"
+    Invoke-PowerBIRestMethod -Url $modelOwnershipUrl -Method POST
+    Write-Host "Semantic model ownership transferred."
+
+    # Update report ownership
+    foreach ($report in $relatedReports) {
+        $reportOwnershipUrl = "groups/$workspaceId/reports/$($report.id)/Default.TakeOver"
+        Invoke-PowerBIRestMethod -Url $reportOwnershipUrl -Method POST
+        Write-Host "Report '$($report.name)' ownership transferred."
+    }
+
+    Write-Host "`nSUCCESS: Model refresh and ownership transfer completed successfully."
 }
 catch {
     Write-Error "ERROR: $_"
     throw
 }
 
-Write-Host "`n=== Done Setting Credentials & Refreshing Model ==="
+Write-Host "`n=== Completed Model Refresh and Ownership Transfer ==="
