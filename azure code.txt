@@ -9347,7 +9347,6 @@ Write-Host "All newly imported models have been refreshed."
 
 Write-Host "`n=== Starting Debug-Enhanced Fabric Model Refresh Process ==="
 
-# Debug Helper Functions
 function Write-DebugLog {
     param(
         [string]$Message,
@@ -9370,27 +9369,6 @@ function Write-DebugLog {
     }
 }
 
-function Test-TokenValidity {
-    param([string]$Token)
-    try {
-        if ($Token -match '\.') {
-            $tokenPayload = $Token.Split('.')[1]
-            $paddedToken = $tokenPayload + "=" * (4 - ($tokenPayload.Length % 4))
-            $decodedToken = [System.Text.Encoding]::UTF8.GetString(
-                [System.Convert]::FromBase64String($paddedToken)
-            )
-            Write-DebugLog "Token payload:" -Data ($decodedToken | ConvertFrom-Json)
-            return $true
-        }
-        Write-DebugLog "Token format invalid" -Type "Warning"
-        return $false
-    }
-    catch {
-        Write-DebugLog "Token validation failed: $_" -Type "Error"
-        return $false
-    }
-}
-
 # Configuration
 $config = @{
     workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
@@ -9401,21 +9379,23 @@ $config = @{
     retryDelaySeconds = 30
 }
 
-Write-DebugLog "Configuration loaded" -Data $config
-
 try {
-    # Step 1: Environment Validation
+    # Step 1: Environment Variable Validation (Fixed Syntax)
     Write-DebugLog "Validating environment variables..."
-    $requiredVars = @('CLIENT_ID', 'CLIENT_SECRET', 'TENANT_ID')
-    $missingVars = $requiredVars.Where({ -not $env:$_ })
+    $missingVars = @()
     
-    if ($missingVars) {
+    if ([string]::IsNullOrEmpty($env:CLIENT_ID)) { $missingVars += "CLIENT_ID" }
+    if ([string]::IsNullOrEmpty($env:CLIENT_SECRET)) { $missingVars += "CLIENT_SECRET" }
+    if ([string]::IsNullOrEmpty($env:TENANT_ID)) { $missingVars += "TENANT_ID" }
+    
+    if ($missingVars.Count -gt 0) {
         throw "Missing required environment variables: $($missingVars -join ', ')"
     }
-    Write-DebugLog "Environment variables validated" -Data @{
-        ClientIdPresent = ![string]::IsNullOrEmpty($env:CLIENT_ID)
-        ClientSecretLength = $env:CLIENT_SECRET.Length
-        TenantIdPresent = ![string]::IsNullOrEmpty($env:TENANT_ID)
+    
+    Write-DebugLog "Environment variables validated successfully" -Type "Success" -Data @{
+        ClientIdPresent = -not [string]::IsNullOrEmpty($env:CLIENT_ID)
+        ClientSecretPresent = -not [string]::IsNullOrEmpty($env:CLIENT_SECRET)
+        TenantIdPresent = -not [string]::IsNullOrEmpty($env:TENANT_ID)
     }
 
     # Step 2: Power BI Service Connection
@@ -9436,35 +9416,14 @@ try {
         throw
     }
 
-    # Step 3: Dataset Validation
+    # Step 3: Dataset Details
     Write-DebugLog "Validating dataset..."
     if (-not $importedModel -or -not $importedModel.id) {
         Write-DebugLog "ImportedModel validation failed" -Type "Error" -Data $importedModel
         throw "Invalid or missing importedModel object"
     }
-    Write-DebugLog "Dataset validation passed" -Data @{
-        ModelId = $importedModel.id
-        ModelType = $importedModel.GetType().Name
-    }
 
-    # Step 4: Get Dataset Details
-    Write-DebugLog "Retrieving dataset details..."
-    try {
-        $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
-        $datasetResponse = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET
-        $datasetDetails = $datasetResponse | ConvertFrom-Json
-        Write-DebugLog "Dataset details retrieved" -Data $datasetDetails
-    }
-    catch {
-        Write-DebugLog "Failed to retrieve dataset details" -Type "Error" -Data @{
-            Error = $_.Exception.Message
-            Response = $_.ErrorDetails.Message
-            StackTrace = $_.ScriptStackTrace
-        }
-        throw
-    }
-
-    # Step 5: Azure SQL Token Acquisition
+    # Step 4: Get Azure SQL Token
     Write-DebugLog "Requesting Azure SQL token..."
     try {
         $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
@@ -9475,9 +9434,6 @@ try {
             scope = "https://database.windows.net/.default"
         }
         $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
-        if (-not (Test-TokenValidity -Token $tokenResponse.access_token)) {
-            throw "Invalid token received"
-        }
         Write-DebugLog "SQL token acquired successfully" -Type "Success"
     }
     catch {
@@ -9488,56 +9444,33 @@ try {
         throw
     }
 
-    # Step 6: Datasource Configuration
-    Write-DebugLog "Retrieving datasource information..."
-    try {
-        $datasourcesUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/datasources"
-        $datasourcesResponse = Invoke-PowerBIRestMethod -Url $datasourcesUrl -Method GET
-        $datasources = ($datasourcesResponse | ConvertFrom-Json).value
-        Write-DebugLog "Datasources retrieved" -Data $datasources
-    }
-    catch {
-        Write-DebugLog "Failed to retrieve datasources" -Type "Error" -Data @{
-            Error = $_.Exception.Message
-            Response = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { "No additional details" }
-        }
-        throw
-    }
-
-    # Step 7: Credential Update
-    Write-DebugLog "Updating credentials..."
+    # Step 5: Update Credentials
+    Write-DebugLog "Updating dataset credentials..."
     try {
         $credentialBody = @{
             credentialDetails = @{
                 credentialType = "OAuth2"
-                credential = @{
-                    AuthenticationKind = "OAuth2"
-                    OAuth2Credentials = @{
-                        ClientId = $env:CLIENT_ID
-                        ClientSecret = $env:CLIENT_SECRET
-                    }
+                credentials = @{
+                    accessToken = $tokenResponse.access_token
                 }
                 privacyLevel = "Organizational"
                 encryptedConnection = "Encrypted"
             }
         }
-        Write-DebugLog "Credential update payload prepared" -Data $credentialBody
 
         $credentialUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetAllConnections"
         $credentialResponse = Invoke-PowerBIRestMethod -Url $credentialUrl -Method POST -Body ($credentialBody | ConvertTo-Json -Depth 10)
-        Write-DebugLog "Credentials updated successfully" -Type "Success" -Data ($credentialResponse | ConvertFrom-Json)
+        Write-DebugLog "Credentials updated successfully" -Type "Success"
     }
     catch {
         Write-DebugLog "Failed to update credentials" -Type "Error" -Data @{
             Error = $_.Exception.Message
             Response = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { "No additional details" }
-            LastUrl = $credentialUrl
-            LastPayload = $credentialBody
         }
         throw
     }
 
-    # Step 8: Trigger and Monitor Refresh
+    # Step 6: Trigger Refresh
     Write-DebugLog "Initiating dataset refresh..."
     try {
         $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
@@ -9545,17 +9478,16 @@ try {
             type = "Full"
             commitMode = "transactional"
             maxParallelism = 10
-            retryCount = 2
             objects = @(@{table = "*"})
         }
         
-        Write-DebugLog "Refresh request payload prepared" -Data $refreshBody
         $refreshResponse = Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
-        Write-DebugLog "Refresh triggered" -Data ($refreshResponse | ConvertFrom-Json)
+        Write-DebugLog "Refresh triggered successfully" -Type "Success"
 
-        # Monitor refresh
+        # Monitor refresh status
         $startTime = Get-Date
         $refreshComplete = $false
+        
         while (-not $refreshComplete) {
             if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.refreshTimeoutMinutes)) {
                 throw "Refresh operation timed out"
@@ -9564,21 +9496,15 @@ try {
             Start-Sleep -Seconds 30
             $statusUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
             $statusResponse = Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json
-            $status = $statusResponse.value[0]
-            
-            Write-DebugLog "Refresh status check" -Data $status
-            
-            switch ($status.status) {
-                "Completed" {
-                    $refreshComplete = $true
-                    Write-DebugLog "Refresh completed successfully" -Type "Success"
-                }
-                "Failed" {
-                    throw "Refresh failed: $($status.detail)"
-                }
-                "Unknown" {
-                    throw "Refresh status unknown"
-                }
+            $status = $statusResponse.value[0].status
+            Write-DebugLog "Current refresh status: $status"
+
+            if ($status -eq "Completed") {
+                $refreshComplete = $true
+                Write-DebugLog "Refresh completed successfully" -Type "Success"
+            }
+            elseif ($status -eq "Failed") {
+                throw "Refresh failed. Check Power BI Service for details."
             }
         }
     }
@@ -9586,7 +9512,6 @@ try {
         Write-DebugLog "Refresh operation failed" -Type "Error" -Data @{
             Error = $_.Exception.Message
             Response = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { "No additional details" }
-            LastStatus = if ($status) { $status } else { "No status available" }
         }
         throw
     }
@@ -9607,4 +9532,4 @@ finally {
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
 }
 
-Write-DebugLog "=== Debug-Enhanced Refresh Process Complete ===" -Type "Success"
+Write-DebugLog "=== Refresh Process Complete ===" -Type "Success"
