@@ -9349,19 +9349,12 @@ Write-Host "`n=== Setting Credentials & Refreshing Fabric Semantic Model ==="
 
 # Configuration Block
 $config = @{
-    # Workspace and Database Configuration
     workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"  # UAT workspace ID
-    sqlServer = "lv-prod-sql.database.windows.net"         # Your SQL Server
-    database = "LAKEVIEWCOLLATERAL"                        # Your database name
-    
-    # Refresh Configuration
+    sqlServer = "lv-prod-sql.database.windows.net"
+    database = "LAKEVIEWCOLLATERAL"
     refreshTimeoutMinutes = 15
     maxRetries = 3
     retryDelaySeconds = 30
-    
-    # API Configuration
-    apiVersion = "v1.0"
-    powerBiApiBase = "https://api.powerbi.com/v1.0"
 }
 
 function Write-LogMessage {
@@ -9378,7 +9371,7 @@ try {
     
     # Validate required environment variables
     if (-not $env:CLIENT_ID -or -not $env:CLIENT_SECRET -or -not $env:TENANT_ID) {
-        throw "Missing required environment variables (CLIENT_ID, CLIENT_SECRET, or TENANT_ID)"
+        throw "Missing required environment variables"
     }
 
     # Step 1: Get Azure SQL Token
@@ -9406,7 +9399,7 @@ try {
     Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
 
     # Step 3: Get Dataset Details
-    Write-LogMessage "Retrieving dataset information for the imported model"
+    Write-LogMessage "Retrieving dataset information"
     $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
     $datasetDetails = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
     Write-LogMessage "Found dataset: $($datasetDetails.name)"
@@ -9417,24 +9410,30 @@ try {
     Invoke-PowerBIRestMethod -Url $takeoverUrl -Method POST
     Write-LogMessage "Successfully transferred dataset ownership"
 
-    # Step 5: Update Parameters
-    Write-LogMessage "Updating dataset parameters"
-    $parametersBody = @{
-        updateDetails = @(
-            @{
-                name = "DatabaseServer"
-                newValue = $config.sqlServer
-            }
-            @{
-                name = "DatabaseName"
-                newValue = $config.database
-            }
-        )
-    } | ConvertTo-Json -Depth 10
+    # Step 5: Update Datasource Credentials
+    Write-LogMessage "Updating datasource credentials"
+    $datasourcesUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/datasources"
+    $datasources = (Invoke-PowerBIRestMethod -Url $datasourcesUrl -Method GET | ConvertFrom-Json).value
 
-    $parametersUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.UpdateParameters"
-    Invoke-PowerBIRestMethod -Url $parametersUrl -Method POST -Body $parametersBody
-    Write-LogMessage "Successfully updated dataset parameters"
+    foreach ($datasource in $datasources) {
+        Write-LogMessage "Processing datasource: $($datasource.datasourceId)"
+        
+        $updateCredentialBody = @{
+            credentialDetails = @{
+                credentialType = "OAuth2"
+                credential = @{
+                    AuthenticationKind = "ServicePrincipal"
+                    ClientId = $env:CLIENT_ID
+                    TenantId = $env:TENANT_ID
+                    Scope = "https://database.windows.net/.default"
+                }
+            }
+        } | ConvertTo-Json -Depth 10
+
+        $credentialUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetCredentials"
+        Invoke-PowerBIRestMethod -Url $credentialUrl -Method POST -Body $updateCredentialBody
+        Write-LogMessage "Updated credentials for datasource $($datasource.datasourceId)"
+    }
 
     # Step 6: Refresh Dataset with Retry Logic
     Write-LogMessage "Initiating dataset refresh with retry logic"
@@ -9452,7 +9451,6 @@ try {
                 type = "Full"
                 commitMode = "transactional"
                 maxParallelism = 10
-                retryCount = 2
                 objects = @(
                     @{
                         table = "*"
