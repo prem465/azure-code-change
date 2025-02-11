@@ -9345,15 +9345,17 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# Script with forced permission refresh and extended workspace access handling
-Write-Host "`n=== Starting Force Permission Refresh Process ==="
+# Enhanced dataset refresh script with detailed logging
+Write-Host "`n=== Starting Detailed Dataset Refresh Process ==="
 
-function Write-Log {
+function Write-DebugLog {
     param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [string]$Level = "INFO",
+        [object]$DebugData = $null,
+        [string]$Component = "General"
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
     $color = switch ($Level) {
         "INFO" { "White" }
         "ERROR" { "Red" }
@@ -9362,162 +9364,242 @@ function Write-Log {
         "DEBUG" { "Cyan" }
         default { "Gray" }
     }
-    Write-Host "[$timestamp] $Level : $Message" -ForegroundColor $color
+    Write-Host "[$timestamp] [$Component] $Level : $Message" -ForegroundColor $color
+    if ($DebugData) {
+        Write-Host "[$Component] Debug Data:" -ForegroundColor Cyan
+        $DebugData | ConvertTo-Json -Depth 10 | Write-Host
+    }
 }
 
-function Force-WorkspaceAccess {
-    param (
-        [string]$WorkspaceId,
-        [string]$ServicePrincipalId
-    )
-    
-    Write-Log "Forcing workspace access refresh..." -Level "DEBUG"
-    
+function Get-DatasetDetails {
+    param($WorkspaceId, $DatasetId)
+    Write-DebugLog -Component "DatasetInfo" -Message "Getting detailed dataset information..." -Level "DEBUG"
     try {
-        # First, get current workspace users
-        $usersUrl = "groups/$WorkspaceId/users"
-        $currentUsers = Invoke-PowerBIRestMethod -Url $usersUrl -Method GET | ConvertFrom-Json
+        $datasetUrl = "groups/$WorkspaceId/datasets/$DatasetId"
+        $dataset = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
         
-        # Remove and re-add service principal to force permission refresh
-        Write-Log "Attempting to refresh service principal permissions..." -Level "DEBUG"
-        
-        $removeUserUrl = "groups/$WorkspaceId/users/$ServicePrincipalId"
-        try {
-            Invoke-PowerBIRestMethod -Url $removeUserUrl -Method DELETE
-            Write-Log "Temporarily removed service principal access" -Level "DEBUG"
-            Start-Sleep -Seconds 5  # Wait for removal to process
+        Write-DebugLog -Component "DatasetInfo" -Message "Dataset found" -Level "DEBUG" -DebugData @{
+            Name = $dataset.name
+            ConfiguredBy = $dataset.configuredBy
+            IsRefreshable = $dataset.isRefreshable
+            LastRefresh = $dataset.lastRefresh
+            ConfiguredByType = $dataset.configuredByType
         }
-        catch {
-            Write-Log "Service principal not found in workspace (this is okay)" -Level "DEBUG"
+        
+        return $dataset
+    }
+    catch {
+        Write-DebugLog -Component "DatasetInfo" -Message "Failed to get dataset details" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            DatasetId = $DatasetId
+            WorkspaceId = $WorkspaceId
+        }
+        throw
+    }
+}
+
+function Test-DataSourceConnection {
+    param($WorkspaceId, $DatasetId)
+    Write-DebugLog -Component "DataSource" -Message "Testing data source connections..." -Level "DEBUG"
+    try {
+        $datasourcesUrl = "groups/$WorkspaceId/datasets/$DatasetId/datasources"
+        $datasources = (Invoke-PowerBIRestMethod -Url $datasourcesUrl -Method GET | ConvertFrom-Json).value
+        
+        foreach ($ds in $datasources) {
+            Write-DebugLog -Component "DataSource" -Message "Checking datasource" -Level "DEBUG" -DebugData @{
+                DatasourceId = $ds.datasourceId
+                DatasourceType = $ds.datasourceType
+                ConnectionDetails = $ds.connectionDetails
+                GatewayId = $ds.gatewayId
+            }
+        }
+        
+        return $datasources
+    }
+    catch {
+        Write-DebugLog -Component "DataSource" -Message "Failed to check datasources" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            StackTrace = $_.ScriptStackTrace
+        }
+        throw
+    }
+}
+
+function Update-DatasetCredentials {
+    param($WorkspaceId, $DatasetId)
+    Write-DebugLog -Component "Credentials" -Message "Updating dataset credentials..." -Level "DEBUG"
+    try {
+        # Get SQL Token
+        Write-DebugLog -Component "Credentials" -Message "Getting SQL token..." -Level "DEBUG"
+        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+        $tokenBody = @{
+            grant_type = "client_credentials"
+            client_id = $env:CLIENT_ID
+            client_secret = $env:CLIENT_SECRET
+            scope = "https://database.windows.net/.default"
+        }
+        
+        $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
+        Write-DebugLog -Component "Credentials" -Message "SQL token acquired" -Level "DEBUG" -DebugData @{
+            TokenType = $tokenResponse.token_type
+            ExpiresIn = $tokenResponse.expires_in
+            Scope = $tokenResponse.scope
         }
 
-        # Re-add service principal with Admin rights
-        $addUserBody = @{
-            identifier = $ServicePrincipalId
-            groupUserAccessRight = "Admin"
-            principalType = "App"
-        } | ConvertTo-Json
+        # Update each datasource
+        $datasources = Test-DataSourceConnection -WorkspaceId $WorkspaceId -DatasetId $DatasetId
+        foreach ($ds in $datasources) {
+            Write-DebugLog -Component "Credentials" -Message "Updating credentials for datasource: $($ds.datasourceId)" -Level "DEBUG"
+            
+            $credBody = @{
+                credentialDetails = @{
+                    credentialType = "OAuth2"
+                    credentials = @{
+                        accessToken = $tokenResponse.access_token
+                    }
+                    encryptedConnection = "Encrypted"
+                    encryptionAlgorithm = "None"
+                    privacyLevel = "Organizational"
+                }
+            }
 
-        Invoke-PowerBIRestMethod -Url $usersUrl -Method POST -Body $addUserBody
-        Write-Log "Re-added service principal with Admin access" -Level "SUCCESS"
-        
-        # Wait for permissions to propagate
-        Start-Sleep -Seconds 15
-        
+            $credUrl = "groups/$WorkspaceId/datasets/$DatasetId/Default.SetCredentials"
+            Invoke-PowerBIRestMethod -Url $credUrl -Method POST -Body ($credBody | ConvertTo-Json -Depth 10)
+            Write-DebugLog -Component "Credentials" -Message "Credentials updated for datasource: $($ds.datasourceId)" -Level "SUCCESS"
+        }
         return $true
     }
     catch {
-        Write-Log "Error during permission refresh: $_" -Level "ERROR"
-        return $false
+        Write-DebugLog -Component "Credentials" -Message "Failed to update credentials" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            StackTrace = $_.ScriptStackTrace
+            Response = if ($_.ErrorDetails) { $_.ErrorDetails.Message } else { "No response details" }
+        }
+        throw
     }
 }
 
-try {
-    # Step 1: Configuration
-    $config = @{
-        workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
-        maxRetries = 3
-        retryDelay = 15
-    }
-
-    # Step 2: Connect to Power BI
-    Write-Log "Connecting to Power BI Service..."
-    $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
-    $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
-    
-    # Disconnect any existing sessions
-    Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
-    Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
-    Write-Log "Connected to Power BI Service" -Level "SUCCESS"
-
-    # Step 3: Force Permission Refresh
-    Write-Log "Starting permission refresh process..."
-    $permissionSuccess = Force-WorkspaceAccess -WorkspaceId $config.workspaceId -ServicePrincipalId $env:CLIENT_ID
-    
-    if (-not $permissionSuccess) {
-        throw "Failed to refresh workspace permissions"
-    }
-
-    # Step 4: Verify Access with Retries
-    Write-Log "Verifying workspace access..."
-    $accessVerified = $false
-    $retryCount = 0
-
-    while (-not $accessVerified -and $retryCount -lt $config.maxRetries) {
-        $retryCount++
-        Write-Log "Attempt $retryCount of $($config.maxRetries) to verify access..."
-
-        try {
-            # Test workspace access
-            $workspace = Get-PowerBIWorkspace -Id $config.workspaceId -ErrorAction Stop
-            if ($workspace) {
-                Write-Log "Successfully accessed workspace" -Level "SUCCESS"
-                $accessVerified = $true
-                break
-            }
-        }
-        catch {
-            Write-Log "Access verification attempt $retryCount failed: $_" -Level "WARNING"
-            if ($retryCount -lt $config.maxRetries) {
-                Write-Log "Waiting $($config.retryDelay) seconds before retry..."
-                Start-Sleep -Seconds $config.retryDelay
-            }
-        }
-    }
-
-    if (-not $accessVerified) {
-        throw "Failed to verify workspace access after $($config.maxRetries) attempts"
-    }
-
-    # Step 5: Refresh Dataset
-    Write-Log "Starting dataset refresh..."
+function Start-DatasetRefresh {
+    param($WorkspaceId, $DatasetId)
+    Write-DebugLog -Component "Refresh" -Message "Starting dataset refresh..." -Level "DEBUG"
     try {
-        $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
+        $refreshUrl = "groups/$WorkspaceId/datasets/$DatasetId/refreshes"
         $refreshBody = @{
             type = "Full"
             commitMode = "transactional"
             maxParallelism = 10
+            retryCount = 2
             objects = @(@{ table = "*" })
-        } | ConvertTo-Json
-
-        Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body $refreshBody
-        Write-Log "Refresh triggered successfully" -Level "SUCCESS"
+        }
+        
+        Write-DebugLog -Component "Refresh" -Message "Sending refresh request" -Level "DEBUG" -DebugData $refreshBody
+        $refreshResponse = Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
+        Write-DebugLog -Component "Refresh" -Message "Refresh request sent successfully" -Level "SUCCESS"
+        
+        return $true
     }
     catch {
-        Write-Log "Error triggering refresh: $_" -Level "ERROR"
-        Write-Log "Detailed error information:" -Level "DEBUG"
-        Write-Log "StatusCode: $($_.Exception.Response.StatusCode)" -Level "DEBUG"
-        Write-Log "StatusDescription: $($_.Exception.Response.StatusDescription)" -Level "DEBUG"
+        Write-DebugLog -Component "Refresh" -Message "Failed to start refresh" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            Response = if ($_.Exception.Response) {
+                $streamReader = [System.IO.StreamReader]::new($_.Exception.Response.GetResponseStream())
+                $streamReader.ReadToEnd()
+            } else { "No response body" }
+        }
         throw
     }
+}
 
-    # Step 6: Monitor Refresh Status
-    Write-Log "Monitoring refresh status..."
+function Get-RefreshHistory {
+    param($WorkspaceId, $DatasetId)
+    try {
+        $historyUrl = "groups/$WorkspaceId/datasets/$DatasetId/refreshes?`$top=5"
+        $history = (Invoke-PowerBIRestMethod -Url $historyUrl -Method GET | ConvertFrom-Json).value
+        Write-DebugLog -Component "RefreshHistory" -Message "Recent refresh history" -Level "DEBUG" -DebugData $history
+        return $history
+    }
+    catch {
+        Write-DebugLog -Component "RefreshHistory" -Message "Failed to get refresh history" -Level "ERROR"
+        return $null
+    }
+}
+
+try {
+    # Configuration
+    $config = @{
+        workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
+        timeoutMinutes = 15
+    }
+
+    # Step 1: Connect to Power BI
+    Write-DebugLog -Component "Connection" -Message "Connecting to Power BI Service..."
+    $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
+    $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
+    Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
+    Write-DebugLog -Component "Connection" -Message "Connected successfully" -Level "SUCCESS"
+
+    # Step 2: Get Dataset Details
+    $dataset = Get-DatasetDetails -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+
+    # Step 3: Check Data Sources
+    $datasources = Test-DataSourceConnection -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+
+    # Step 4: Update Credentials
+    Update-DatasetCredentials -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+
+    # Step 5: Start Refresh
+    Start-DatasetRefresh -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+
+    # Step 6: Monitor Refresh with Enhanced Logging
+    Write-DebugLog -Component "RefreshMonitor" -Message "Monitoring refresh status..." -Level "DEBUG"
     $startTime = Get-Date
     $refreshComplete = $false
 
     while (-not $refreshComplete) {
-        Start-Sleep -Seconds 30
-        $statusUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
-        $status = (Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json).value[0].status
-        Write-Log "Current status: $status"
-
-        if ($status -eq "Completed") {
-            $refreshComplete = $true
-            Write-Log "Refresh completed successfully" -Level "SUCCESS"
+        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.timeoutMinutes)) {
+            Write-DebugLog -Component "RefreshMonitor" -Message "Refresh timeout reached" -Level "ERROR"
+            Get-RefreshHistory -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+            throw "Refresh operation timed out"
         }
-        elseif ($status -eq "Failed") {
-            throw "Refresh failed. Check Power BI Service for details."
+
+        Start-Sleep -Seconds 30
+        $status = Get-RefreshHistory -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+        $currentStatus = $status[0].status
+        
+        Write-DebugLog -Component "RefreshMonitor" -Message "Current refresh status: $currentStatus" -Level "DEBUG" -DebugData $status[0]
+
+        switch ($currentStatus) {
+            "Completed" {
+                $refreshComplete = $true
+                Write-DebugLog -Component "RefreshMonitor" -Message "Refresh completed successfully" -Level "SUCCESS"
+            }
+            "Failed" {
+                Write-DebugLog -Component "RefreshMonitor" -Message "Refresh failed" -Level "ERROR" -DebugData $status[0]
+                
+                # Get detailed error information
+                Write-DebugLog -Component "RefreshMonitor" -Message "Checking for common issues:" -Level "WARNING"
+                Write-DebugLog -Component "RefreshMonitor" -Message "1. Database Connection:" -Level "WARNING"
+                Test-DataSourceConnection -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+                
+                Write-DebugLog -Component "RefreshMonitor" -Message "2. Recent Refresh History:" -Level "WARNING"
+                Get-RefreshHistory -WorkspaceId $config.workspaceId -DatasetId $importedModel.id
+                
+                throw "Refresh failed. Check logs for details."
+            }
         }
     }
 }
 catch {
-    Write-Log "Critical error occurred: $_" -Level "ERROR"
+    Write-DebugLog -Component "Error" -Message "Critical error in refresh process" -Level "ERROR" -DebugData @{
+        Error = $_.Exception.Message
+        StackTrace = $_.ScriptStackTrace
+        InnerError = $_.Exception.InnerException
+    }
     throw
 }
 finally {
-    Write-Log "Cleaning up..."
+    Write-DebugLog -Component "Cleanup" -Message "Performing cleanup..."
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
 }
 
-Write-Log "=== Process Complete ==="
+Write-DebugLog -Component "Complete" -Message "=== Refresh Process Complete ===" -Level "SUCCESS"
