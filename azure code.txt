@@ -9345,8 +9345,8 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# Enhanced script with service principal permission handling
-Write-Host "`n=== Starting Enhanced Semantic Model Refresh ==="
+# Script with forced permission refresh and extended workspace access handling
+Write-Host "`n=== Starting Force Permission Refresh Process ==="
 
 function Write-Log {
     param(
@@ -9365,143 +9365,142 @@ function Write-Log {
     Write-Host "[$timestamp] $Level : $Message" -ForegroundColor $color
 }
 
-function Test-WorkspaceAccess {
+function Force-WorkspaceAccess {
     param (
         [string]$WorkspaceId,
-        [int]$RetryCount = 3,
-        [int]$RetryDelay = 10
+        [string]$ServicePrincipalId
     )
     
-    for ($i = 1; $i -le $RetryCount; $i++) {
+    Write-Log "Forcing workspace access refresh..." -Level "DEBUG"
+    
+    try {
+        # First, get current workspace users
+        $usersUrl = "groups/$WorkspaceId/users"
+        $currentUsers = Invoke-PowerBIRestMethod -Url $usersUrl -Method GET | ConvertFrom-Json
+        
+        # Remove and re-add service principal to force permission refresh
+        Write-Log "Attempting to refresh service principal permissions..." -Level "DEBUG"
+        
+        $removeUserUrl = "groups/$WorkspaceId/users/$ServicePrincipalId"
         try {
-            Write-Log "Attempt $i of $RetryCount to verify workspace access..."
-            
-            # Get current identity information
-            $identity = Invoke-PowerBIRestMethod -Url "groups/$WorkspaceId/users" -Method GET | ConvertFrom-Json
-            $currentUser = $identity.value | Where-Object { $_.identifier -eq $env:CLIENT_ID }
-            
-            if ($currentUser) {
-                Write-Log "Found user in workspace with role: $($currentUser.groupUserAccessRight)" -Level "DEBUG"
-                return $true
-            }
-            
-            Write-Log "Service Principal not found in workspace users list. Waiting $RetryDelay seconds..." -Level "WARNING"
-            Start-Sleep -Seconds $RetryDelay
+            Invoke-PowerBIRestMethod -Url $removeUserUrl -Method DELETE
+            Write-Log "Temporarily removed service principal access" -Level "DEBUG"
+            Start-Sleep -Seconds 5  # Wait for removal to process
         }
         catch {
-            Write-Log "Error checking workspace access: $_" -Level "WARNING"
-            if ($i -lt $RetryCount) {
-                Start-Sleep -Seconds $RetryDelay
-            }
+            Write-Log "Service principal not found in workspace (this is okay)" -Level "DEBUG"
         }
+
+        # Re-add service principal with Admin rights
+        $addUserBody = @{
+            identifier = $ServicePrincipalId
+            groupUserAccessRight = "Admin"
+            principalType = "App"
+        } | ConvertTo-Json
+
+        Invoke-PowerBIRestMethod -Url $usersUrl -Method POST -Body $addUserBody
+        Write-Log "Re-added service principal with Admin access" -Level "SUCCESS"
+        
+        # Wait for permissions to propagate
+        Start-Sleep -Seconds 15
+        
+        return $true
     }
-    return $false
+    catch {
+        Write-Log "Error during permission refresh: $_" -Level "ERROR"
+        return $false
+    }
 }
 
 try {
-    # Step 1: Initial Setup
-    Write-Log "Setting up refresh process..."
+    # Step 1: Configuration
     $config = @{
         workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
-        timeoutMinutes = 15
+        maxRetries = 3
+        retryDelay = 15
     }
 
-    # Step 2: Primary Authentication
-    Write-Log "Authenticating service principal..."
+    # Step 2: Connect to Power BI
+    Write-Log "Connecting to Power BI Service..."
     $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
     $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
-
-    # Disconnect existing sessions first
-    Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
     
-    # Connect with explicit service principal flow
-    Connect-PowerBIServiceAccount -ServicePrincipal `
-                                -Credential $credential `
-                                -TenantId $env:TENANT_ID
+    # Disconnect any existing sessions
+    Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
+    Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
+    Write-Log "Connected to Power BI Service" -Level "SUCCESS"
 
-    # Step 3: Verify Workspace Access
-    Write-Log "Verifying workspace access..."
-    if (-not (Test-WorkspaceAccess -WorkspaceId $config.workspaceId)) {
-        throw "Service Principal requires Admin access to workspace. Please verify permissions."
+    # Step 3: Force Permission Refresh
+    Write-Log "Starting permission refresh process..."
+    $permissionSuccess = Force-WorkspaceAccess -WorkspaceId $config.workspaceId -ServicePrincipalId $env:CLIENT_ID
+    
+    if (-not $permissionSuccess) {
+        throw "Failed to refresh workspace permissions"
     }
 
-    # Step 4: Get Dataset Details
-    Write-Log "Getting dataset details..."
-    $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
-    $dataset = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
-    Write-Log "Found dataset: $($dataset.name)"
+    # Step 4: Verify Access with Retries
+    Write-Log "Verifying workspace access..."
+    $accessVerified = $false
+    $retryCount = 0
 
-    # Step 5: Take Ownership with Retry
-    Write-Log "Taking ownership of dataset..."
-    $ownershipSuccess = $false
-    $retryCount = 3
+    while (-not $accessVerified -and $retryCount -lt $config.maxRetries) {
+        $retryCount++
+        Write-Log "Attempt $retryCount of $($config.maxRetries) to verify access..."
 
-    for ($i = 1; $i -le $retryCount; $i++) {
         try {
-            $takeoverUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.TakeOver"
-            Invoke-PowerBIRestMethod -Url $takeoverUrl -Method POST
-            $ownershipSuccess = $true
-            Write-Log "Successfully took ownership of dataset" -Level "SUCCESS"
-            break
+            # Test workspace access
+            $workspace = Get-PowerBIWorkspace -Id $config.workspaceId -ErrorAction Stop
+            if ($workspace) {
+                Write-Log "Successfully accessed workspace" -Level "SUCCESS"
+                $accessVerified = $true
+                break
+            }
         }
         catch {
-            Write-Log "Attempt $i of $retryCount to take ownership failed: $_" -Level "WARNING"
-            if ($i -lt $retryCount) {
-                Start-Sleep -Seconds 10
+            Write-Log "Access verification attempt $retryCount failed: $_" -Level "WARNING"
+            if ($retryCount -lt $config.maxRetries) {
+                Write-Log "Waiting $($config.retryDelay) seconds before retry..."
+                Start-Sleep -Seconds $config.retryDelay
             }
         }
     }
 
-    if (-not $ownershipSuccess) {
-        Write-Log "Continuing without ownership transfer..." -Level "WARNING"
+    if (-not $accessVerified) {
+        throw "Failed to verify workspace access after $($config.maxRetries) attempts"
     }
 
-    # Step 6: Update Credentials
-    Write-Log "Updating dataset credentials..."
-    $credentialBody = @{
-        credentialDetails = @{
-            credentialType = "OAuth2"
-            credential = @{
-                AuthenticationKind = "ServicePrincipal"
-                ClientId = $env:CLIENT_ID
-                TenantId = $env:TENANT_ID
-            }
-            privacyLevel = "Organizational"
-            encryptedConnection = "Encrypted"
-        }
+    # Step 5: Refresh Dataset
+    Write-Log "Starting dataset refresh..."
+    try {
+        $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
+        $refreshBody = @{
+            type = "Full"
+            commitMode = "transactional"
+            maxParallelism = 10
+            objects = @(@{ table = "*" })
+        } | ConvertTo-Json
+
+        Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body $refreshBody
+        Write-Log "Refresh triggered successfully" -Level "SUCCESS"
+    }
+    catch {
+        Write-Log "Error triggering refresh: $_" -Level "ERROR"
+        Write-Log "Detailed error information:" -Level "DEBUG"
+        Write-Log "StatusCode: $($_.Exception.Response.StatusCode)" -Level "DEBUG"
+        Write-Log "StatusDescription: $($_.Exception.Response.StatusDescription)" -Level "DEBUG"
+        throw
     }
 
-    $credentialUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetCredentials"
-    Invoke-PowerBIRestMethod -Url $credentialUrl -Method POST -Body ($credentialBody | ConvertTo-Json -Depth 10)
-    Write-Log "Credentials updated successfully"
-
-    # Step 7: Trigger Refresh
-    Write-Log "Initiating dataset refresh..."
-    $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
-    $refreshBody = @{
-        type = "Full"
-        commitMode = "transactional"
-        maxParallelism = 10
-        objects = @(@{ table = "*" })
-    }
-
-    Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
-    Write-Log "Refresh triggered successfully"
-
-    # Step 8: Monitor Refresh
+    # Step 6: Monitor Refresh Status
     Write-Log "Monitoring refresh status..."
     $startTime = Get-Date
     $refreshComplete = $false
 
     while (-not $refreshComplete) {
-        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.timeoutMinutes)) {
-            throw "Refresh operation timed out after $($config.timeoutMinutes) minutes"
-        }
-
         Start-Sleep -Seconds 30
         $statusUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
         $status = (Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json).value[0].status
-        Write-Log "Current refresh status: $status"
+        Write-Log "Current status: $status"
 
         if ($status -eq "Completed") {
             $refreshComplete = $true
@@ -9513,17 +9512,7 @@ try {
     }
 }
 catch {
-    Write-Log "Error in refresh process: $_" -Level "ERROR"
-    
-    # Enhanced error reporting
-    if ($_.Exception.Message -like "*403*" -or $_.Exception.Message -like "*Forbidden*") {
-        Write-Log "Permission Error Detected!" -Level "ERROR"
-        Write-Log "Please verify the following:" -Level "ERROR"
-        Write-Log "1. Service Principal (lv-powerbi) has Admin role in workspace" -Level "ERROR"
-        Write-Log "2. Service Principal has Tenant.ReadWrite.All permission" -Level "ERROR"
-        Write-Log "3. Wait a few minutes for permission propagation" -Level "ERROR"
-    }
-    
+    Write-Log "Critical error occurred: $_" -Level "ERROR"
     throw
 }
 finally {
@@ -9531,4 +9520,4 @@ finally {
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
 }
 
-Write-Log "=== Refresh Process Complete ==="
+Write-Log "=== Process Complete ==="
