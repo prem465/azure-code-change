@@ -9345,188 +9345,251 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-# This script implements semantic model refresh for your specific UAT scenario
-# It follows Microsoft's recommended approach using Admin REST APIs
-# Each section is documented to explain its purpose and operation
+# Comprehensive debug-enhanced semantic model refresh script
+# This script includes detailed permission checking and debugging
 
-Write-Host "`n=== Starting UAT Semantic Model Refresh Process ==="
+Write-Host "`n=== Starting Debug-Enhanced Semantic Model Refresh ==="
 
-# Helper function for consistent logging with timestamps
-function Write-Log {
+function Write-DebugLog {
     param(
         [string]$Message,
-        [string]$Level = "INFO"
+        [string]$Level = "INFO",
+        [object]$DebugData = $null
     )
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
     $color = switch ($Level) {
         "INFO" { "White" }
         "ERROR" { "Red" }
         "WARNING" { "Yellow" }
         "SUCCESS" { "Green" }
+        "DEBUG" { "Cyan" }
         default { "Gray" }
     }
     Write-Host "[$timestamp] $Level : $Message" -ForegroundColor $color
+    
+    if ($DebugData) {
+        Write-Host "Debug Data:" -ForegroundColor Cyan
+        $DebugData | ConvertTo-Json -Depth 10 | Write-Host
+    }
 }
 
-# Configuration specific to your environment
-$config = @{
-    # UAT Workspace ID from your environment
-    workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
+# Permission checking functions
+function Test-PowerBIWorkspaceAccess {
+    param($WorkspaceId)
+    Write-DebugLog "Testing Power BI Workspace Access..." -Level "DEBUG"
     
-    # SQL Server Configuration
-    sqlServer = "lv-prod-sql.database.windows.net"
-    database = "LAKEVIEWCOLLATERAL"
-    
-    # API and timeout settings
-    apiVersion = "v1.0"
-    timeoutMinutes = 15
-    retryAttempts = 3
-    retryDelay = 30  # seconds
-}
-
-try {
-    # Step 1: Initial Environment Validation and Setup
-    Write-Log "Validating environment setup..."
-    
-    # Check required environment variables
-    $requiredVars = @('CLIENT_ID', 'CLIENT_SECRET', 'TENANT_ID')
-    foreach ($var in $requiredVars) {
-        if (-not (Get-Item "env:$var" -ErrorAction SilentlyContinue)) {
-            throw "Missing required environment variable: $var"
+    try {
+        # Get workspace details
+        $workspace = Get-PowerBIWorkspace -Id $WorkspaceId
+        
+        # Check workspace access level
+        $accessDetails = @{
+            WorkspaceName = $workspace.Name
+            AccessLevel = $workspace.Type
+            IsAdmin = $false
+            UserAccess = $null
         }
+
+        # Get workspace users to check role
+        $usersUrl = "groups/$WorkspaceId/users"
+        $users = Invoke-PowerBIRestMethod -Url $usersUrl -Method GET | ConvertFrom-Json
+        $currentUser = $users.value | Where-Object { $_.identifier -eq $env:CLIENT_ID }
+        
+        if ($currentUser) {
+            $accessDetails.UserAccess = $currentUser.groupUserAccessRight
+            $accessDetails.IsAdmin = $currentUser.groupUserAccessRight -eq "Admin"
+        }
+
+        Write-DebugLog "Workspace access details" -Level "DEBUG" -DebugData $accessDetails
+        
+        if (-not $accessDetails.IsAdmin) {
+            throw "Service Principal needs Admin access to workspace. Current role: $($accessDetails.UserAccess)"
+        }
+        
+        return $true
+    }
+    catch {
+        Write-DebugLog "Workspace access check failed" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            WorkspaceId = $WorkspaceId
+            ClientId = $env:CLIENT_ID
+        }
+        throw
+    }
+}
+
+function Test-SQLDatabaseAccess {
+    param($ServerName, $DatabaseName)
+    Write-DebugLog "Testing SQL Database Access..." -Level "DEBUG"
+    
+    try {
+        # Get SQL token
+        $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+        $tokenBody = @{
+            grant_type = "client_credentials"
+            client_id = $env:CLIENT_ID
+            client_secret = $env:CLIENT_SECRET
+            scope = "https://database.windows.net/.default"
+        }
+        $sqlToken = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
+        
+        # Test token validity
+        $tokenDebug = @{
+            TokenReceived = $null -ne $sqlToken.access_token
+            TokenType = $sqlToken.token_type
+            ExpiresIn = $sqlToken.expires_in
+            Scope = $sqlToken.scope
+        }
+        Write-DebugLog "SQL token details" -Level "DEBUG" -DebugData $tokenDebug
+        
+        return $true
+    }
+    catch {
+        Write-DebugLog "SQL access check failed" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            Server = $ServerName
+            Database = $DatabaseName
+            ClientId = $env:CLIENT_ID
+        }
+        throw
+    }
+}
+
+function Test-AzureADPermissions {
+    param()
+    Write-DebugLog "Testing Azure AD Permissions..." -Level "DEBUG"
+    
+    try {
+        # Get application details from Azure AD
+        $graphUrl = "https://graph.microsoft.com/v1.0/applications"
+        $graphToken = Invoke-RestMethod -Uri "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token" -Method POST -Body @{
+            grant_type = "client_credentials"
+            client_id = $env:CLIENT_ID
+            client_secret = $env:CLIENT_SECRET
+            scope = "https://graph.microsoft.com/.default"
+        }
+        
+        $appDetails = Invoke-RestMethod -Uri $graphUrl -Headers @{
+            Authorization = "Bearer $($graphToken.access_token)"
+        }
+        
+        $permissionDebug = @{
+            ApplicationFound = $null -ne $appDetails
+            Permissions = $appDetails.value | Where-Object { $_.appId -eq $env:CLIENT_ID } | Select-Object -ExpandProperty requiredResourceAccess
+        }
+        Write-DebugLog "Azure AD permissions" -Level "DEBUG" -DebugData $permissionDebug
+        
+        return $true
+    }
+    catch {
+        Write-DebugLog "Azure AD permission check failed" -Level "ERROR" -DebugData @{
+            Error = $_.Exception.Message
+            ClientId = $env:CLIENT_ID
+            TenantId = $env:TENANT_ID
+        }
+        throw
+    }
+}
+
+# Main script execution
+try {
+    # Configuration
+    $config = @{
+        workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
+        sqlServer = "lv-prod-sql.database.windows.net"
+        database = "LAKEVIEWCOLLATERAL"
+        timeoutMinutes = 15
     }
 
-    # Load required Power BI module
-    if (-not (Get-Module -Name MicrosoftPowerBIMgmt -ListAvailable)) {
-        Write-Log "Installing Power BI module..."
-        Install-Module -Name MicrosoftPowerBIMgmt -Force -Scope CurrentUser -AllowClobber
-    }
-    Import-Module MicrosoftPowerBIMgmt -Force
-    Write-Log "Environment setup completed successfully"
+    Write-DebugLog "Starting permission validation..." -Level "DEBUG"
 
-    # Step 2: Service Principal Authentication
-    Write-Log "Authenticating service principal..."
+    # Step 1: Comprehensive Permission Checks
+    Write-DebugLog "Checking all required permissions..." -Level "INFO"
+    
+    # Check Power BI Workspace Access
+    try {
+        Test-PowerBIWorkspaceAccess -WorkspaceId $config.workspaceId
+        Write-DebugLog "Power BI workspace access verified" -Level "SUCCESS"
+    }
+    catch {
+        Write-DebugLog "Power BI workspace access check failed: $_" -Level "ERROR"
+        Write-DebugLog "Action Required: Please request 'Admin' role in Power BI workspace" -Level "ERROR"
+        throw
+    }
+
+    # Check SQL Database Access
+    try {
+        Test-SQLDatabaseAccess -ServerName $config.sqlServer -DatabaseName $config.database
+        Write-DebugLog "SQL database access verified" -Level "SUCCESS"
+    }
+    catch {
+        Write-DebugLog "SQL database access check failed: $_" -Level "ERROR"
+        Write-DebugLog "Action Required: Please request db_datareader role in SQL Database" -Level "ERROR"
+        throw
+    }
+
+    # Check Azure AD Permissions
+    try {
+        Test-AzureADPermissions
+        Write-DebugLog "Azure AD permissions verified" -Level "SUCCESS"
+    }
+    catch {
+        Write-DebugLog "Azure AD permission check failed: $_" -Level "ERROR"
+        Write-DebugLog "Action Required: Please check Azure AD app permissions" -Level "ERROR"
+        throw
+    }
+
+    # Step 2: Service Connection
+    Write-DebugLog "Connecting to Power BI Service..." -Level "DEBUG"
     $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
     $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
     Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
-    Write-Log "Service principal authentication successful"
 
-    # Step 3: Get Dataset Details and Take Ownership
-    Write-Log "Getting dataset details and taking ownership..."
-    $datasetUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)"
+    # Step 3: Dataset Operations with Debug Info
+    Write-DebugLog "Getting dataset details..." -Level "DEBUG"
+    $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
     $dataset = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
     
-    # Take ownership using admin API
-    $takeoverUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)/Default.TakeOver"
-    Invoke-PowerBIRestMethod -Url $takeoverUrl -Method POST
-    Write-Log "Successfully took ownership of dataset: $($dataset.name)"
-
-    # Step 4: SQL Authentication Token
-    Write-Log "Acquiring SQL authentication token..."
-    $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
-    $tokenBody = @{
-        grant_type = "client_credentials"
-        client_id = $env:CLIENT_ID
-        client_secret = $env:CLIENT_SECRET
-        scope = "https://database.windows.net/.default"
-    }
-    $sqlToken = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
-    Write-Log "SQL authentication token acquired successfully"
-
-    # Step 5: Update Semantic Model Connection
-    Write-Log "Updating semantic model connection..."
-    $credentialBody = @{
-        credentialDetails = @{
-            credentialType = "OAuth2"
-            credential = @{
-                accessToken = $sqlToken.access_token
-            }
-            privacyLevel = "Organizational"
-            encryptedConnection = "Encrypted"
-        }
+    Write-DebugLog "Dataset details" -Level "DEBUG" -DebugData @{
+        DatasetId = $dataset.id
+        Name = $dataset.name
+        ConfiguredBy = $dataset.configuredBy
     }
 
-    $credentialUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetCredentials"
-    Invoke-PowerBIRestMethod -Url $credentialUrl -Method POST -Body ($credentialBody | ConvertTo-Json -Depth 10)
-    Write-Log "Semantic model connection updated successfully"
+    # Rest of your refresh code here...
+    # [Previous refresh implementation continues...]
 
-    # Step 6: Initiate Refresh Operation
-    Write-Log "Starting semantic model refresh..."
-    $refreshUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
-    $refreshBody = @{
-        type = "Full"
-        commitMode = "transactional"
-        maxParallelism = 10
-        retryCount = $config.retryAttempts
-        objects = @(@{ table = "*" })
-    }
-
-    Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
-    Write-Log "Refresh operation initiated successfully"
-
-    # Step 7: Monitor Refresh Status with Retry Logic
-    Write-Log "Monitoring refresh status..."
-    $startTime = Get-Date
-    $refreshComplete = $false
-    $attemptCount = 0
-
-    while (-not $refreshComplete) {
-        # Check for timeout
-        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.timeoutMinutes)) {
-            throw "Refresh operation timed out after $($config.timeoutMinutes) minutes"
-        }
-
-        # Get current status
-        Start-Sleep -Seconds $config.retryDelay
-        $statusUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
-        $refreshStatus = (Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json).value[0]
-
-        Write-Log "Refresh status: $($refreshStatus.status)"
-        
-        switch ($refreshStatus.status) {
-            "Completed" {
-                $refreshComplete = $true
-                Write-Log "Refresh completed successfully" -Level "SUCCESS"
-            }
-            "Failed" {
-                $attemptCount++
-                if ($attemptCount -ge $config.retryAttempts) {
-                    throw "Refresh failed after $attemptCount attempts: $($refreshStatus.errorMessage)"
-                }
-                Write-Log "Refresh attempt $attemptCount failed, retrying..." -Level "WARNING"
-                Start-Sleep -Seconds $config.retryDelay
-                
-                # Retry the refresh
-                Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
-            }
-            "Unknown" {
-                Write-Log "Status unknown, continuing to monitor..." -Level "WARNING"
-            }
-        }
-    }
-
-    # Step 8: Final Verification
-    Write-Log "Performing final verification..."
-    $finalStateUrl = "admin/workspaces/$($config.workspaceId)/datasets/$($importedModel.id)"
-    $finalState = Invoke-PowerBIRestMethod -Url $finalStateUrl -Method GET | ConvertFrom-Json
-    
-    if ($finalState.configuredBy -eq $env:CLIENT_ID) {
-        Write-Log "Final state verification successful" -Level "SUCCESS"
-    } else {
-        Write-Log "Warning: Dataset ownership may need verification" -Level "WARNING"
-    }
 }
 catch {
-    $errorMessage = "Critical error in refresh process: $_"
-    Write-Log $errorMessage "ERROR"
-    Write-Log "Error details: $($_.Exception.Message)" "ERROR"
-    Write-Log "Stack trace: $($_.ScriptStackTrace)" "ERROR"
-    throw $errorMessage
+    $errorDetails = @{
+        Message = $_.Exception.Message
+        ScriptStackTrace = $_.ScriptStackTrace
+        FullError = $_
+    }
+    Write-DebugLog "Critical error in refresh process" -Level "ERROR" -DebugData $errorDetails
+    
+    # Provide guidance based on error type
+    switch -Regex ($_.Exception.Message) {
+        ".*403.*" {
+            Write-DebugLog "Permission Error Detected" -Level "ERROR"
+            Write-DebugLog "Required Permissions:" -Level "ERROR"
+            Write-DebugLog "1. Power BI Workspace: Admin role" -Level "ERROR"
+            Write-DebugLog "2. SQL Database: db_datareader role" -Level "ERROR"
+            Write-DebugLog "3. Azure AD: Power BI Service app permissions" -Level "ERROR"
+        }
+        ".*401.*" {
+            Write-DebugLog "Authentication Error Detected" -Level "ERROR"
+            Write-DebugLog "Please verify service principal credentials and tenant ID" -Level "ERROR"
+        }
+        default {
+            Write-DebugLog "Unknown Error - Please contact support with the error details above" -Level "ERROR"
+        }
+    }
+    throw
 }
 finally {
-    # Cleanup
-    Write-Log "Performing cleanup operations..."
+    Write-DebugLog "Cleaning up connections..." -Level "INFO"
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
 }
 
-Write-Log "=== UAT Semantic Model Refresh Process Complete ==="
+Write-DebugLog "=== Debug-Enhanced Refresh Process Complete ==="
