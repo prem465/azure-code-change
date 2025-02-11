@@ -9345,42 +9345,28 @@ Write-Host "All newly imported models have been refreshed."
 --------------------------------------------------------------------------------------------
 
 
-Write-Host "`n=== Starting Fabric Model Refresh Process ==="
+Write-Host "`n=== Starting Fabric Semantic Model Refresh ==="
 
-# Simple logging function
 function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
     $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
     Write-Host "[$timestamp] $Level : $Message"
 }
 
-# Configuration
-$script:config = @{
-    workspaceId = "a4628c7b-adda-4285-8c1f-758b19162d0b"
-    sqlServer = "lv-prod-sql.database.windows.net"
-    database = "LAKEVIEWCOLLATERAL"
-    refreshTimeout = 15  # minutes
-}
-
 try {
-    # Step 1: Validate Environment Variables
-    Write-Log "Validating environment variables..."
-    
-    if (-not $env:CLIENT_ID) {
-        throw "CLIENT_ID environment variable is not set"
-    }
-    if (-not $env:CLIENT_SECRET) {
-        throw "CLIENT_SECRET environment variable is not set"
-    }
-    if (-not $env:TENANT_ID) {
-        throw "TENANT_ID environment variable is not set"
-    }
-    Write-Log "Environment variables validated successfully"
+    # Step 1: Environment Check
+    Write-Log "Checking environment variables..."
+    if (-not $env:CLIENT_ID) { throw "CLIENT_ID is missing" }
+    if (-not $env:CLIENT_SECRET) { throw "CLIENT_SECRET is missing" }
+    if (-not $env:TENANT_ID) { throw "TENANT_ID is missing" }
 
-    # Step 2: Load Required Modules
+    # Step 2: Import Required Modules
     Write-Log "Loading required modules..."
     Import-Module MicrosoftPowerBIMgmt -ErrorAction Stop
-    Import-Module Az.Accounts -ErrorAction Stop
+    Import-Module "./FabricPS-PBIP.psm1" -ErrorAction Stop
     Write-Log "Modules loaded successfully"
 
     # Step 3: Connect to Services
@@ -9388,105 +9374,112 @@ try {
     $secureSecret = ConvertTo-SecureString $env:CLIENT_SECRET -AsPlainText -Force
     $credential = New-Object System.Management.Automation.PSCredential($env:CLIENT_ID, $secureSecret)
 
-    # Connect to Power BI
+    # Connect to Fabric
+    Set-FabricAuthToken -servicePrincipalId $env:CLIENT_ID `
+                       -servicePrincipalSecret $env:CLIENT_SECRET `
+                       -tenantId $env:TENANT_ID `
+                       -reset
+    Write-Log "Fabric authentication successful"
+
+    # Connect to Power BI (needed for some operations)
     Connect-PowerBIServiceAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
-    Write-Log "Connected to Power BI Service"
+    Write-Log "Power BI connection successful"
 
-    # Connect to Azure
-    Connect-AzAccount -ServicePrincipal -Credential $credential -TenantId $env:TENANT_ID
-    Write-Log "Connected to Azure"
-
-    # Step 4: Get Azure SQL Token
-    Write-Log "Requesting Azure SQL token..."
-    $token = Get-AzAccessToken -ResourceUrl "https://database.windows.net/"
-    if (-not $token.Token) {
-        throw "Failed to obtain SQL token"
+    # Step 4: Get Workspace Details
+    Write-Log "Getting workspace details..."
+    $workspace = Get-FabricWorkspace -workspaceName $env:UAT_WORKSPACE_NAME
+    if (-not $workspace) {
+        throw "Workspace '$($env:UAT_WORKSPACE_NAME)' not found"
     }
-    Write-Log "SQL token obtained successfully"
+    Write-Log "Found workspace: $($workspace.name)"
 
-    # Step 5: Get Dataset Details
-    Write-Log "Getting dataset details..."
-    $datasetUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)"
-    $dataset = Invoke-PowerBIRestMethod -Url $datasetUrl -Method GET | ConvertFrom-Json
-    Write-Log "Found dataset: $($dataset.name)"
+    # Step 5: Get Current State
+    Write-Log "Getting semantic model details..."
+    $items = Invoke-FabricAPIRequest -Uri "workspaces/$($workspace.Id)/items" -Method GET
+    $model = $items | Where-Object { $_.id -eq $importedModel.id }
+    if (-not $model) {
+        throw "Model not found in workspace"
+    }
+    Write-Log "Found model: $($model.displayName) [ID: $($model.id)]"
 
-    # Step 6: Take Ownership
-    Write-Log "Taking ownership of dataset..."
-    $takeoverUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.TakeOver"
-    Invoke-PowerBIRestMethod -Url $takeoverUrl -Method POST
-    Write-Log "Ownership transferred successfully"
+    # Step 6: SQL Authentication
+    Write-Log "Getting SQL token..."
+    $tokenUrl = "https://login.microsoftonline.com/$($env:TENANT_ID)/oauth2/v2.0/token"
+    $tokenBody = @{
+        grant_type = "client_credentials"
+        client_id = $env:CLIENT_ID
+        client_secret = $env:CLIENT_SECRET
+        scope = "https://database.windows.net/.default"
+    }
+    $tokenResponse = Invoke-RestMethod -Uri $tokenUrl -Method POST -Body $tokenBody
+    Write-Log "SQL token acquired successfully"
 
-    # Step 7: Update Credentials
-    Write-Log "Updating dataset credentials..."
-    $credBody = @{
-        credentialDetails = @{
+    # Step 7: Update Model Connection
+    Write-Log "Updating semantic model connection..."
+    $connectionBody = @{
+        type = "SQL"
+        connectionDetails = @{
+            server = "lv-prod-sql.database.windows.net"
+            database = "LAKEVIEWCOLLATERAL"
+        }
+        credentials = @{
             credentialType = "OAuth2"
-            credential = @{
-                accessToken = $token.Token
-            }
-            privacyLevel = "Organizational"
-            encryptedConnection = "Encrypted"
+            accessToken = $tokenResponse.access_token
+            scope = "https://database.windows.net/.default"
         }
     }
 
-    $credUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/Default.SetCredentials"
-    Invoke-PowerBIRestMethod -Url $credUrl -Method POST -Body ($credBody | ConvertTo-Json -Depth 10)
-    Write-Log "Credentials updated successfully"
+    $connectionUrl = "workspaces/$($workspace.Id)/semanticModels/$($model.id)/connection"
+    Invoke-FabricAPIRequest -Uri $connectionUrl -Method PATCH -Body ($connectionBody | ConvertTo-Json -Depth 10)
+    Write-Log "Connection updated successfully"
 
-    # Step 8: Trigger Refresh
-    Write-Log "Triggering dataset refresh..."
-    $refreshUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes"
+    # Step 8: Initiate Refresh
+    Write-Log "Starting semantic model refresh..."
     $refreshBody = @{
-        type = "Full"
+        type = "full"
         commitMode = "transactional"
         maxParallelism = 10
-        retryCount = 2
     }
+    
+    $refreshUrl = "workspaces/$($workspace.Id)/semanticModels/$($model.id)/refresh"
+    Invoke-FabricAPIRequest -Uri $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
+    Write-Log "Refresh initiated successfully"
 
-    Invoke-PowerBIRestMethod -Url $refreshUrl -Method POST -Body ($refreshBody | ConvertTo-Json)
-    Write-Log "Refresh triggered successfully"
-
-    # Step 9: Monitor Refresh Status
+    # Step 9: Monitor Refresh
     Write-Log "Monitoring refresh status..."
     $startTime = Get-Date
-    $refreshComplete = $false
-
-    while (-not $refreshComplete) {
-        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes($config.refreshTimeout)) {
-            throw "Refresh operation timed out after $($config.refreshTimeout) minutes"
+    $completed = $false
+    
+    while (-not $completed) {
+        if ((Get-Date) - $startTime -gt [TimeSpan]::FromMinutes(15)) {
+            throw "Refresh operation timed out after 15 minutes"
         }
 
         Start-Sleep -Seconds 30
-        $statusUrl = "groups/$($config.workspaceId)/datasets/$($importedModel.id)/refreshes?`$top=1"
-        $status = (Invoke-PowerBIRestMethod -Url $statusUrl -Method GET | ConvertFrom-Json).value[0].status
-        Write-Log "Current refresh status: $status"
+        $statusUrl = "workspaces/$($workspace.Id)/semanticModels/$($model.id)/refreshes?`$top=1"
+        $status = (Invoke-FabricAPIRequest -Uri $statusUrl -Method GET).value[0]
+        Write-Log "Refresh status: $($status.status)"
 
-        switch ($status) {
-            "Completed" {
-                $refreshComplete = $true
-                Write-Log "Refresh completed successfully"
+        switch ($status.status) {
+            "Completed" { 
+                $completed = $true
+                Write-Log "Refresh completed successfully" -Level "SUCCESS"
             }
             "Failed" {
-                throw "Refresh failed. Check Power BI Service for details."
-            }
-            "Unknown" {
-                throw "Refresh status is unknown"
+                throw "Refresh failed: $($status.errorMessage)"
             }
         }
     }
 
-    Write-Log "Model refresh process completed successfully"
+    Write-Log "Semantic model refresh completed successfully" -Level "SUCCESS"
 }
 catch {
-    $errorMessage = "Error in refresh process: $_"
-    Write-Log $errorMessage "ERROR"
-    throw $errorMessage
+    Write-Log "Error occurred: $_" -Level "ERROR"
+    throw
 }
 finally {
-    # Cleanup
-    Write-Log "Performing cleanup..."
+    Write-Log "Cleaning up connections..."
     Disconnect-PowerBIServiceAccount -ErrorAction SilentlyContinue
-    Disconnect-AzAccount -ErrorAction SilentlyContinue
 }
 
-Write-Log "=== Model Refresh Process Complete ==="
+Write-Log "=== Fabric Semantic Model Refresh Complete ==="
