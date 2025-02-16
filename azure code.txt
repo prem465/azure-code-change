@@ -9603,3 +9603,70 @@ finally {
 }
 
 Write-DebugLog -Component "Complete" -Message "=== Refresh Process Complete ===" -Level "SUCCESS"
+
+-------------------------------------------------------
+
+Write-Host "=== Determining Commits to Compare ==="
+
+#
+# 1) If this is a Pull Request build, use the PR’s source/target commits.
+#
+if ($env:SYSTEM_PULLREQUEST_SOURCECOMMITID -and $env:SYSTEM_PULLREQUEST_TARGETCOMMITID) {
+    $baseCommit = $env:SYSTEM_PULLREQUEST_TARGETCOMMITID
+    $headCommit = $env:SYSTEM_PULLREQUEST_SOURCECOMMITID
+    Write-Host "Detected Pull Request scenario. Using PR commits:"
+    Write-Host "baseCommit=$baseCommit"
+    Write-Host "headCommit=$headCommit"
+}
+#
+# 2) Otherwise, fallback to HEAD~1..HEAD logic if available
+#
+elseif ((git rev-parse HEAD~1) -and ($LASTEXITCODE -eq 0)) {
+    $baseCommit = "HEAD~1"
+    $headCommit = "HEAD"
+    Write-Host "Using fallback: $baseCommit..$headCommit"
+}
+#
+# 3) Single commit scenario if none above
+#
+else {
+    $baseCommit = "HEAD"
+    $headCommit = "HEAD"
+    Write-Host "Single commit scenario => $baseCommit..$headCommit"
+}
+
+Write-Host "Comparing commits: $baseCommit..$headCommit"
+
+# === Define file patterns ===
+# Adjust as needed for your project
+$modelPatterns  = @('**/*.pbism')
+$reportPatterns = @('**/*.pbir','**/*.pbix','**/*.json')
+
+# === Detect Added/Modified (AM) Files ===
+Write-Host "`n=== Detecting Added/Modified Files ==="
+
+$modelAddMod = @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $modelPatterns) | Sort-Object -Unique
+$reportAddMod= @(git diff --name-only --relative --diff-filter=AM $baseCommit $headCommit -- $reportPatterns) | Sort-Object -Unique
+
+Write-Host "Models Add/Mod : $($modelAddMod -join ', ')"
+Write-Host "Reports Add/Mod: $($reportAddMod -join ', ')"
+
+# === Detect Deletions for “definition.pbism” or “definition.pbir” ===
+Write-Host "`n=== Also detecting Deletions for 'definition.*' files ==="
+$pbismDeletions = @(git diff --name-only --relative --diff-filter=D $baseCommit $headCommit '**/definition.pbism') | Sort-Object -Unique
+$pbirDeletions  = @(git diff --name-only --relative --diff-filter=D $baseCommit $headCommit '**/definition.pbir')  | Sort-Object -Unique
+
+Write-Host "PBISM Deletions: $($pbismDeletions -join ', ')"
+Write-Host "PBIR Deletions : $($pbirDeletions -join ', ')"
+
+# === Count total changes ===
+[int]$totalChanges = $modelAddMod.Count + $reportAddMod.Count + $pbismDeletions.Count + $pbirDeletions.Count
+
+if ($totalChanges -eq 0) {
+    Write-Host "`nNo changes detected (no add/modify or relevant deletions). Exiting pipeline."
+    exit 0
+}
+
+Write-Host "`nTotal parts changed: $totalChanges"
+# ... Continue with the rest of your code ...
+
